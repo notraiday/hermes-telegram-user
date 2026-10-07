@@ -172,7 +172,8 @@ def _load_account_env(path: Path | None) -> None:
     """Fill in the plugin's variables from the Hermes .env where the process lacks them.
 
     The gateway has them in its environment; a shell or a cron pre-run script may
-    not. Only HERMES_TG_USER_* is read, and nothing already set is overridden.
+    not. Only HERMES_TG_USER_* and HERMES_TIMEZONE (times in exports, the night
+    window) are read, and nothing already set is overridden.
     """
     import os
 
@@ -189,7 +190,7 @@ def _load_account_env(path: Path | None) -> None:
             line = line[len("export "):].lstrip()
         key, sep, value = line.partition("=")
         key = key.strip()
-        if not sep or not key.startswith("HERMES_TG_USER_") or os.environ.get(key):
+        if not sep or not (key.startswith("HERMES_TG_USER_") or key == "HERMES_TIMEZONE") or os.environ.get(key):
             continue
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
