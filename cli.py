@@ -16,7 +16,7 @@ import argparse
 import sys
 from pathlib import Path
 
-__all__ = ["inbox_command", "login_command", "register_cli", "run_command"]
+__all__ = ["dialogs_command", "inbox_command", "login_command", "register_cli", "run_command"]
 
 
 def register_cli(subparser: argparse.ArgumentParser) -> None:
@@ -105,11 +105,30 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     )
     inbox.set_defaults(func=run_command)
 
+    dialogs = actions.add_parser(
+        "dialogs",
+        help="Check delegated dialogs for answers the agent has not seen",
+        description=(
+            "With --peek, prints JSON with the delegated dialogs whose chat has a message "
+            "from the other side after the last one the agent saw, per account; expired "
+            "delegations are closed and listed. For the dialogs cron job's pre-run script."
+        ),
+    )
+    dialogs.add_argument("--peek", action="store_true", help="report dialogs waiting for an answer")
+    dialogs.add_argument("--account", action="append", default=None,
+                         help="account to check; repeat for several (default: every configured account)")
+    dialogs.add_argument("--env", type=Path, default=None,
+                         help="dotenv file to read the accounts from (default: the Hermes .env)")
+    dialogs.set_defaults(func=run_command)
+
 
 def run_command(args: argparse.Namespace) -> int:
     """Dispatch on the subcommand; a bare ``hermes telegram-user`` stays the login."""
-    if getattr(args, "telegram_user_action", None) == "inbox":
+    action = getattr(args, "telegram_user_action", None)
+    if action == "inbox":
         return inbox_command(args)
+    if action == "dialogs":
+        return dialogs_command(args)
     return login_command(args)
 
 
@@ -188,4 +207,36 @@ def inbox_command(args: argparse.Namespace) -> int:
     key = "new_chats" if peek else "marked"
     total = sum(int(row.get(key) or 0) for row in rows)
     print(json.dumps({key: total, "accounts": rows}, ensure_ascii=False))
+    return 1 if failed else 0
+
+
+def dialogs_command(args: argparse.Namespace) -> int:
+    """``hermes telegram-user dialogs --peek``: delegated dialogs with unseen answers, per account."""
+    import asyncio
+    import json
+
+    if not getattr(args, "peek", False):
+        print("pass --peek: hermes telegram-user dialogs --peek", file=sys.stderr)
+        return 2
+    _load_account_env(getattr(args, "env", None))
+
+    from .core.accounts import account_names, use_account
+    from .tools import delegations_peek
+
+    try:
+        names = [n.strip().lower() for n in (getattr(args, "account", None) or account_names())]
+    except Exception as exc:
+        print(json.dumps({"error": str(exc)}, ensure_ascii=False))
+        return 1
+    rows, failed = [], False
+    for name in names:
+        try:
+            with use_account(name):
+                rows.append(asyncio.run(delegations_peek()))
+        except Exception as exc:
+            failed = True
+            rows.append({"account": name, "error": str(exc) or type(exc).__name__})
+    waiting = sum(len(row.get("waiting") or []) for row in rows)
+    expired = sum(len(row.get("expired") or []) for row in rows)
+    print(json.dumps({"waiting": waiting, "expired": expired, "accounts": rows}, ensure_ascii=False))
     return 1 if failed else 0

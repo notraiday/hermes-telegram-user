@@ -1,6 +1,6 @@
 name: telegram-user
 label: Telegram User (MTProto)
-version: "0.12.0+rai.7"
+version: "0.12.0+rai.8"
 description: Tools over one or more Telegram user accounts (MTProto) — each read-only or read-write, each with its own proxy. Reading, search, unread/folder/inbox digests with local marks, collections, archive with offline search, media and voice transcripts; on write accounts also sending, replies, files, forwards, reactions, edits, deletions, pins and read marks. No chat platform — talk to Hermes through the regular Telegram bot.
 author: community
 # Declared here, not only in requirements.txt: Hermes installs these into its own
@@ -53,6 +53,8 @@ optional_env:
     description: Directory for private alias/transcript state; defaults to ~/.hermes/state/telegram-user
     prompt: Telegram plugin state directory
     password: false
+hooks:
+  - pre_tool_call
 provides_tools:
   - tg_list_chats
   - tg_accounts
@@ -100,3 +102,8 @@ provides_tools:
   - tg_set_collection_brief
   - tg_delete_collection
   - tg_read_collection
+  - tg_delegate_dialog
+  - tg_list_delegations
+  - tg_dialog_read
+  - tg_dialog_message
+  - tg_close_delegation

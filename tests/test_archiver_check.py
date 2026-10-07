@@ -269,3 +269,37 @@ def test_the_script_runs_standalone_under_a_bare_environment(tmp_path):
     assert done.returncode == 0, done.stderr
     assert "DAVIS_PASSWORD" in done.stdout  # calendar not configured: said, not crashed
     assert (home / "state" / "archiver" / "vault.git" / "HEAD").exists()
+
+
+def test_open_queue_items_are_passed_on_and_a_missing_queue_is_not_an_error(world):
+    module, vault, _, _ = world
+    assert module.queue_report(vault) is None
+    (vault / "Агент").mkdir()
+    (vault / "Агент" / "Очередь.md").write_text("- [x] готово\n- [ ] разобрать чеки\n", encoding="utf-8")
+    report = module.queue_report(vault)
+    assert "- [ ] разобрать чеки" in report and "готово" not in report
+
+
+def test_the_dialogs_check_wakes_only_on_answers_or_expiry(tmp_path):
+    peek = tmp_path / "peek.json"
+    fake = tmp_path / "hermes"
+    fake.write_text("#!/bin/sh\ncat \"$PEEK_FILE\"\n", encoding="utf-8")
+    fake.chmod(0o755)
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path),
+           "HERMES_HOME": str(tmp_path), "ARCHIVER_HERMES_BIN": str(fake), "PEEK_FILE": str(peek)}
+    script = ROOT / "dialogs" / "dialogs_check.py"
+
+    def run(payload):
+        peek.write_text(json.dumps(payload), encoding="utf-8")
+        done = subprocess.run([sys.executable, "-I", str(script)], capture_output=True, text=True,
+                              env=env, timeout=60)
+        assert done.returncode == 0, done.stderr
+        return done.stdout.strip()
+
+    assert run({"waiting": 0, "expired": 0, "accounts": [{"account": "agent", "waiting": [], "expired": []}]}) == GATE
+    out = run({"accounts": [{"account": "agent", "waiting": [
+        {"id": "a1b2c3", "chat": "manager", "goal": "столик", "new_messages": 2}], "expired": []}]})
+    assert "поручение a1b2c3 «manager»: новых сообщений 2. Цель: столик" in out
+    out = run({"accounts": [{"account": "agent", "waiting": [], "expired": [
+        {"id": "d4e5f6", "chat": "salon", "goal": "стрижка"}]}]})
+    assert "## Истекли" in out and "d4e5f6" in out

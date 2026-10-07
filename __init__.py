@@ -16,6 +16,12 @@ def register(ctx: Any) -> None:
 
     tools.register_tools(ctx)
 
+    # A delegated dialog lets the agent write without asking, so creating one
+    # must ask: the plugin's own hook, independent of any other policy plugin.
+    register_hook = getattr(ctx, "register_hook", None)
+    if callable(register_hook):
+        register_hook("pre_tool_call", tools.delegation_approval)
+
     # `hermes telegram-user login`: the one-time interactive login belongs on the
     # CLI, because Telegram delivers the code to the account owner's app.
     register_cli_command = getattr(ctx, "register_cli_command", None)

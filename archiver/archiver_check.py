@@ -13,7 +13,9 @@ costs no GPU time. Three sources are checked, none of them with the model:
   returns only what changed since the last tick; event snapshots kept here turn
   that into "these fields changed". The first run only stores the sync tokens;
 * Telegram — ``hermes telegram-user inbox --peek`` says which chats have new
-  messages; the agent reads them itself with tg_read_inbox.
+  messages; the agent reads them itself with tg_read_inbox;
+* the main agent's queue — open ``- [ ]`` items in ``Агент/Очередь.md``, so the
+  archiver never has to open notes that may not exist yet.
 
 The archiver writes to the vault and the calendar too. So that it does not take
 its own edits for the owner's on the next tick, it lists what it changed in
@@ -226,6 +228,23 @@ def vault_report(state: dict[str, Any], vault: Path, skip_paths: set[str]) -> Op
         used += len(body)
         parts.append(f"{header}\n```diff\n{body}\n```")
     return "\n\n".join(parts)
+
+
+QUEUE_NOTE = "Агент/Очередь.md"
+
+
+def queue_report(vault: Path) -> Optional[str]:
+    """Open tasks the main agent left for the archiver; nothing if the note has none."""
+    try:
+        text = (vault / QUEUE_NOTE).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    open_items = [line.strip() for line in text.splitlines()
+                  if line.strip().startswith(("- [ ]", "* [ ]"))]
+    if not open_items:
+        return None
+    return (f"## Очередь основного агента ({len(open_items)})\nОткрытые пункты из `{QUEUE_NOTE}`:\n"
+            + "\n".join(open_items[:30]))
 
 
 # --- calendar: WebDAV sync-collection against Davis ----------------------------------
@@ -475,6 +494,7 @@ def main() -> int:
 
     sections: list[str] = []
     for name, check in (("Vault", lambda: vault_report(state, vault, skip_paths)),
+                        ("Очередь", lambda: queue_report(vault)),
                         ("Календарь", lambda: calendar_report(state, skip_uids)),
                         ("Telegram", telegram_report)):
         try:
