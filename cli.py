@@ -70,18 +70,26 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
 
     inbox = actions.add_parser(
         "inbox",
-        help="Check for new inbox messages without reading or marking them",
+        help="Check the inbox for new messages, or mark it all as processed",
         description=(
-            "With --peek, prints JSON saying which chats tg_read_inbox would return "
-            "something for, per account, without fetching the messages or moving any "
-            "mark. Meant for a cron pre-run script deciding whether to wake the agent. "
-            "Exit code 1 if any account could not be checked."
+            "--peek prints JSON saying which chats tg_read_inbox would return something "
+            "for, per account, without fetching the messages or moving any mark: for a "
+            "cron pre-run script deciding whether to wake the agent. --mark-all marks "
+            "every inbox chat as processed up to now without reading it: a starting "
+            "point for an archiver that should not work through old history. Exit code "
+            "1 if any account failed."
         ),
     )
-    inbox.add_argument(
+    mode = inbox.add_mutually_exclusive_group()
+    mode.add_argument(
         "--peek",
         action="store_true",
-        help="report which chats have new messages (the only mode)",
+        help="report which chats have new messages",
+    )
+    mode.add_argument(
+        "--mark-all",
+        action="store_true",
+        help="mark every inbox chat as processed up to now, without reading it (a starting point)",
     )
     inbox.add_argument(
         "--account",
@@ -149,17 +157,20 @@ def _load_account_env(path: Path | None) -> None:
 
 
 def inbox_command(args: argparse.Namespace) -> int:
-    """``hermes telegram-user inbox --peek``: JSON of chats with new messages, per account."""
+    """``hermes telegram-user inbox --peek | --mark-all``: one JSON line, per account."""
     import asyncio
     import json
 
-    if not getattr(args, "peek", False):
-        print("only --peek is supported: hermes telegram-user inbox --peek", file=sys.stderr)
+    peek, mark_all = bool(getattr(args, "peek", False)), bool(getattr(args, "mark_all", False))
+    if peek == mark_all:
+        print("pass one of: hermes telegram-user inbox --peek | --mark-all", file=sys.stderr)
         return 2
     _load_account_env(getattr(args, "env", None))
 
     from .core.accounts import account_names, use_account
-    from .tools import inbox_peek
+    from .tools import inbox_mark_all, inbox_peek
+
+    action = inbox_peek if peek else inbox_mark_all
 
     try:
         names = [n.strip().lower() for n in (getattr(args, "account", None) or account_names())]
@@ -170,10 +181,11 @@ def inbox_command(args: argparse.Namespace) -> int:
     for name in names:
         try:
             with use_account(name):
-                rows.append(asyncio.run(inbox_peek()))
+                rows.append(asyncio.run(action()))
         except Exception as exc:
             failed = True
             rows.append({"account": name, "error": str(exc) or type(exc).__name__})
-    total = sum(int(row.get("new_chats") or 0) for row in rows)
-    print(json.dumps({"new_chats": total, "accounts": rows}, ensure_ascii=False))
+    key = "new_chats" if peek else "marked"
+    total = sum(int(row.get(key) or 0) for row in rows)
+    print(json.dumps({key: total, "accounts": rows}, ensure_ascii=False))
     return 1 if failed else 0

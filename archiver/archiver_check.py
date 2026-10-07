@@ -459,7 +459,7 @@ def telegram_report() -> Optional[str]:
             rows.append(f"- {account}: проверить не удалось ({str(row['error'])[:200]}) — вызови tg_read_inbox(account=\"{account}\") сам")
         elif row.get("new_chats"):
             rows.append(f"- {account}: новые сообщения в {row['new_chats']} чатах — tg_read_inbox(account=\"{account}\"), "
-                        f"после разбора tg_mark_inbox(account=\"{account}\")")
+                        f"после разбора tg_mark_inbox(account=\"{account}\", batch=…)")
     if not rows:
         return None
     return "## Telegram\n" + "\n".join(rows)

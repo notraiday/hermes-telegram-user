@@ -802,7 +802,7 @@ def test_inbox_reads_saved_private_and_collection_chats_and_marks_them():
         original = tools.tool_client
         tools.tool_client = fake_client
         try:
-            first = json.loads(_run(tools._tg_read_inbox({})))
+            first = json.loads(_run(tools._tg_read_inbox({"format": "json"})))
             got = {c["chat_id"]: c for c in first["chats"]}
             assert set(got) == {"1", "2", "3", "-50"}, sorted(got)
             assert got["1"]["sources"] == ["saved"] and got["1"]["first_visit"]
@@ -814,7 +814,7 @@ def test_inbox_reads_saved_private_and_collection_chats_and_marks_them():
 
             history[2].append(12)
             history[50].append(103)
-            second = json.loads(_run(tools._tg_read_inbox({})))
+            second = json.loads(_run(tools._tg_read_inbox({"format": "json"})))
             got = {c["chat_id"]: [m["id"] for m in c["messages"]] for c in second["chats"]}
             assert got == {"2": [12], "-50": [103]}, got
         finally:
@@ -855,8 +855,8 @@ def _peek_world():
                     date=datetime.now(timezone.utc), version=1)
     forum = tl.Chat(id=60, title="forum", photo=tl.ChatPhotoEmpty(), participants_count=3,
                     date=datetime.now(timezone.utc), version=1)
-    history = {1: [1, 2], 2: [10, 11], 4: [30], 777000: [40], 50: [100], 60: [200]}
-    thread = {60: [201]}  # messages in forum thread 7
+    history = {1: [1, 2], 2: [10, 11], 4: [30], 777000: [40], 50: [100], 60: [200, 201]}
+    thread = {60: [201]}  # forum thread 7; its messages are in the chat's history too
     requests = []
 
     class Client:
@@ -903,12 +903,13 @@ def test_inbox_peek_sees_what_read_inbox_would_return_and_marks_nothing():
             assert requests == [(60, 7)], requests
 
             # Peeking marked nothing: the inbox still returns all of it.
-            first = json.loads(_run(tools._tg_read_inbox({})))
+            first = json.loads(_run(tools._tg_read_inbox({"format": "json"})))
             assert {(c["chat_id"], c["thread_id"]) for c in first["chats"]} == set(got)
             assert not json.loads(_run(tools._tg_mark_inbox({"marks": first["marks"]})))["errors"]
             assert _run(tools.inbox_peek())["new_chats"] == 0
 
             history[2].append(12)
+            history[60].append(202)
             thread[60].append(202)
             history[4].append(31)  # bots stay out, as in tg_read_inbox
             peek = _run(tools.inbox_peek())
@@ -964,3 +965,94 @@ def test_inbox_command_takes_plugin_variables_from_the_env_file(tmp_path):
             os.environ.pop(k, None)
             if v is not None:
                 os.environ[k] = v
+
+
+def test_inbox_text_is_one_line_per_message_and_marks_by_batch():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from telethon.tl import types as tl
+
+    tools = _tools()
+    me = tl.User(id=1, is_self=True, first_name="me")
+    friend = tl.User(id=2, first_name="Петя")
+    history = {1: [1], 2: [10, 11]}
+    texts = {1: "купить хлеб", 10: "привет", 11: "встреча в пятницу\nв 15:00"}
+
+    class Client:
+        async def iter_dialogs(self):
+            for e in (me, friend):
+                yield SimpleNamespace(entity=e, dialog=SimpleNamespace(top_message=history[e.id][-1]))
+
+        async def iter_messages(self, entity, limit=None, min_id=0, reverse=False, **kw):
+            ids = [i for i in history[entity.id] if i > (min_id or 0)]
+            ids = ids if reverse else list(reversed(ids))
+            for i in ids[:limit]:
+                yield SimpleNamespace(
+                    id=i, date=datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc), message=texts[i],
+                    out=entity.id == 1, sender=None if entity.id == 1 else friend, sender_id=entity.id,
+                    reply_to=None, media=None, fwd_from=None, entities=None, reply_markup=None,
+                    grouped_id=None)
+
+    @contextlib.asynccontextmanager
+    async def fake_client(*a, **k):
+        yield Client()
+
+    with account_env(mode="read"), isolated_state():
+        original = tools.tool_client
+        tools.tool_client = fake_client
+        previous_tz = os.environ.get("HERMES_TIMEZONE")
+        os.environ["HERMES_TIMEZONE"] = "Europe/Moscow"
+        try:
+            text = _run(tools._tg_read_inbox({}))
+            assert text.startswith("Аккаунт acct: новое в 2 чатах.")
+            assert "== me · Избранное — заметки владельца · id 1" in text
+            assert "[07.10 15:00] #1 я: купить хлеб" in text
+            assert "[07.10 15:00] #11 Петя: встреча в пятницу\n  в 15:00" in text
+            assert "{" not in text  # no JSON to wade through
+            batch = text.split('batch="', 1)[1].split('"', 1)[0]
+            assert len(batch) == 6
+
+            assert "unknown batch" in _run(tools._tg_mark_inbox({"batch": "zzz"}))
+            marked = json.loads(_run(tools._tg_mark_inbox({"batch": batch})))
+            assert marked["marked"] == 2 and not marked["errors"]
+            assert _run(tools._tg_read_inbox({})) == "Аккаунт acct: нового нет."
+        finally:
+            tools.tool_client = original
+            if previous_tz is None:
+                os.environ.pop("HERMES_TIMEZONE", None)
+            else:
+                os.environ["HERMES_TIMEZONE"] = previous_tz
+
+
+def test_mark_all_starts_from_now_without_reading_any_chat(capsys, tmp_path):
+    import argparse
+
+    tools = _tools()
+    cli = plugin_module("cli")
+    store = plugin_module("core.state.collections")
+    history, thread, requests, fake_client = _peek_world()
+
+    with account_env(mode="read"), isolated_state():
+        store.save_collection("watch", members=[{"peer_id": "-60", "thread": 7}])
+        original = tools.tool_client
+        tools.tool_client = fake_client
+        try:
+            args = argparse.Namespace(telegram_user_action="inbox", peek=False, mark_all=True,
+                                      account=None, env=tmp_path / "missing.env")
+            assert cli.run_command(args) == 0
+            out = json.loads(capsys.readouterr().out)
+            assert out["marked"] == 3, out  # Saved Messages, the private chat, the thread
+            assert requests == []  # only the dialog list was fetched
+            assert _run(tools.inbox_peek())["new_chats"] == 0
+
+            history[2].append(12)
+            history[60].append(202)
+            thread[60].append(202)
+            peek = _run(tools.inbox_peek())
+            assert {(c["chat_id"], c["thread_id"]) for c in peek["chats"]} == {("2", None), ("-60", "7")}
+
+            args.peek = True
+            assert cli.run_command(args) == 2  # one mode at a time
+        finally:
+            tools.tool_client = original

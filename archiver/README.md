@@ -19,3 +19,7 @@ The job: `hermes cron create "*/5 8-22 * * *" "<prompt>" --name archiver --skill
 
 The archiver records what it changed in `Агент/Архиватор/Последние правки.md`; the next
 check leaves those files and events out, so it never reacts to its own edits.
+
+To start from today instead of old history, run `hermes telegram-user inbox --mark-all` once
+before creating the job. With `cron.mirror_delivery: true` the archiver's report also lands in
+the Telegram chat's session, so the main agent sees it when the owner replies to the bot.
