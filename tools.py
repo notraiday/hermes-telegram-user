@@ -2853,7 +2853,7 @@ _TOOL_DEFS = [
     ),
     (
         "tg_save_collection",
-        "Save a named local set of chats and/or individual forum threads, with an optional exclude list, so a scope can be reused instead of re-listed every time. A scope in both lists is treated as excluded. Only local state changes.",
+        "Save a named local set of chats and/or individual forum threads, with an optional exclude list, so a scope can be reused instead of re-listed every time. A scope in both lists is treated as excluded. replace defaults to true (the lists become exactly these); pass replace=false to add chats to, or exclude them from, an existing collection. Only local state changes.",
         _tg_save_collection,
         _obj(
             {
