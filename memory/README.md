@@ -42,3 +42,21 @@ collections:
 The search server: `qmd mcp --http --host 127.0.0.1 --port 8181` as a user service.
 `--host 127.0.0.1` matters: without it qmd binds `localhost`, which current Node
 resolves to IPv6 `::1` only, and Hermes connecting to `127.0.0.1` finds nothing.
+
+`qmd-relevance.patch` (for qmd 2.8.3) makes the MCP `query` tool return the
+reranker's own judgement as `relevance` (0–1) next to `score`, and show it in the
+text summary. qmd computes it anyway but its MCP server drops it; `score` is a blend
+that keeps the top hit at ≥0.75 even when nothing relevant was found, so the agent
+cannot tell "found" from "nothing there". Apply it after every install or update of
+qmd, then restart the search service:
+
+```sh
+P=~/.hermes/plugins/telegram-user/memory/qmd-relevance.patch
+cd "$(npm root -g)/@tobilu/qmd"
+if patch -p1 -R --dry-run -s -f < "$P" >/dev/null; then echo "already applied"
+elif patch -p1 --forward --dry-run < "$P"; then patch -p1 --forward < "$P"; fi
+systemctl --user restart qmd-mcp
+```
+
+If npm's global directory belongs to root, put `sudo` before the last `patch` (the one after `then`).
+A failed hunk means qmd changed; do not force it, the patch needs redoing.

@@ -1,0 +1,37 @@
+--- a/dist/mcp/server.js
++++ b/dist/mcp/server.js
+@@ -39,7 +39,8 @@
+     }
+     const lines = [`Found ${results.length} result${results.length === 1 ? '' : 's'} for "${query}":\n`];
+     for (const r of results) {
+-        lines.push(`${r.docid} ${Math.round(r.score * 100)}% ${r.file} - ${r.title}`);
++        const shown = r.relevance === undefined ? `${Math.round(r.score * 100)}%` : `relevance ${Math.round(r.relevance * 100)}%`;
++        lines.push(`${r.docid} ${shown} ${r.file} - ${r.title}`);
+     }
+     return lines.join('\n');
+ }
+@@ -184,6 +185,8 @@
+ 
+ Each result includes a \`line\` field with the absolute 1-indexed line of the best match in the source markdown. To read more context around a hit, call \`get(file, fromLine = max(1, line - 20), maxLines = 80, lineNumbers = true)\`.
+ 
++With reranking on, each result also has \`relevance\`: the reranker's own 0-1 judgement of whether the matched passage answers the query, independent of the other results. \`score\` is a rank-weighted blend (the top hit scores high even when nothing relevant exists); judge hits by \`relevance\`.
++
+ ## Query Types
+ 
+ **lex** — BM25 keyword search. Fast, exact, no LLM needed.
+@@ -282,6 +285,7 @@
+             candidateLimit,
+             rerank,
+             intent,
++            explain: rerank !== false,
+         });
+         // Use the plain query, or the first lex/vec sub-query, for snippet extraction
+         const primaryQuery = query
+@@ -296,6 +300,7 @@
+                 file: r.displayPath,
+                 title: r.title,
+                 score: Math.round(r.score * 100) / 100,
++                ...(rerank !== false && r.explain ? { relevance: Math.round(r.explain.rerankScore * 100) / 100 } : {}),
+                 context: r.context,
+                 line,
+                 snippet: addLineNumbers(snippet, line),
