@@ -11,10 +11,11 @@ Three qmd collections make up the owner's searchable memory:
 `calendar_export.py` needs `archiver_check.py` next to it (it reuses its CalDAV
 client); copy both into `~/.hermes/scripts/`.
 
-The export turns photos, image documents and PDFs into text when
-`HERMES_TG_USER_VISION_MODEL` names a vision model in Ollama
-(`HERMES_TG_USER_OLLAMA_URL`, default `http://10.10.10.2:11434`): new ones at
+With `--ocr` the export turns photos, image documents and PDFs into text with the
+vision model from Hermes' own config (`auxiliary.vision`, else the main model; an
+Ollama endpoint is called through its own API with thinking off): new ones at
 every run, old ones only at night (`HERMES_TG_USER_OCR_NIGHT`, default `23-8`).
+`HERMES_TG_USER_VISION_MODEL` / `HERMES_TG_USER_VISION_URL` override the config.
 PDFs with a text layer need `pdftotext`, scanned ones `pdftoppm` (poppler-utils).
 
 `~/.config/qmd/index.yml` (collections part):

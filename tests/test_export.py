@@ -142,15 +142,16 @@ def test_chats_become_monthly_markdown_and_a_quiet_run_writes_nothing(tmp_path):
         assert "#14 Петя: ещё" in (out / "acct/Петя__6000000001/2026-10.md").read_text(encoding="utf-8")
 
 
-def test_attachments_new_by_day_old_at_night_with_original_and_links(tmp_path):
+def test_attachments_new_by_day_old_at_night_with_original_and_links(tmp_path, monkeypatch):
     seen = []
 
-    def fake_vision(data):
+    def fake_vision(data, mime="image/jpeg"):
         seen.append(data)
         return "ДОКУМЕНТ: кассовый чек\nПятёрочка\nИтого 512,00"
 
-    with _setup(tmp_path, HERMES_TG_USER_VISION_MODEL="qwen-vision") as (export, world, out):
-        export.vision_text = fake_vision
+    with _setup(tmp_path, HERMES_TG_USER_VISION_MODEL="qwen-vision",
+                HERMES_TG_USER_VISION_URL="http://10.10.10.2:11434/v1") as (export, world, out):
+        monkeypatch.setattr(export, "vision_text", fake_vision)
         report = _run(export, out, ocr=True)
         assert report["media_done"] == 1 and len(seen) == 1  # only the fresh photo by day
         assert report["media_skipped"] == 1  # the zip document: not an image, never retried
@@ -174,8 +175,41 @@ def test_message_links_open_the_message_in_telegram():
     assert export.message_link("-50", 5, "group") == "tg://openmessage?chat_id=50&message_id=5"
 
 
-def test_ocr_is_off_until_a_vision_model_is_named(tmp_path):
+def test_ocr_is_off_until_a_vision_model_is_named(tmp_path, monkeypatch):
     with _setup(tmp_path) as (export, world, out):
-        export.vision_text = lambda data: (_ for _ in ()).throw(AssertionError("must not be called"))
+        monkeypatch.setattr(export, "_hermes_config", lambda: {})
+        monkeypatch.setattr(export, "vision_text",
+                            lambda *a: (_ for _ in ()).throw(AssertionError("must not be called")))
         report = _run(export, out, ocr=True)
         assert report["media_done"] == 0 and not (out / "acct/Петя__6000000001/media").exists()
+
+
+def test_the_vision_model_comes_from_the_hermes_config(monkeypatch):
+    export = plugin_module("export")
+    for name in ("HERMES_TG_USER_VISION_MODEL", "HERMES_TG_USER_VISION_URL"):
+        monkeypatch.delenv(name, raising=False)
+    config = {"model": {"provider": "custom", "default": "qwen3.8:27b-mtp-q4_K_M",
+                        "base_url": "http://10.10.10.2:11434/v1"}}
+    monkeypatch.setattr(export, "_hermes_config", lambda: config)
+    assert export.vision_endpoint() == ("http://10.10.10.2:11434/v1", "qwen3.8:27b-mtp-q4_K_M")
+
+    config["auxiliary"] = {"vision": {"model": "qwen-vl", "base_url": "http://ollama.lan:11434/v1"}}
+    assert export.vision_endpoint() == ("http://ollama.lan:11434/v1", "qwen-vl")
+
+    assert export.vision_endpoint.__doc__  # auxiliary.vision first, then the main model
+
+
+def test_vision_uses_ollamas_own_api_with_thinking_off(monkeypatch):
+    export = plugin_module("export")
+    calls = []
+
+    def fake_post(url, payload):
+        calls.append((url, payload))
+        return {"message": {"content": "<think>hm</think>ФОТО: дача, мангал"}}
+
+    monkeypatch.setattr(export, "_post", fake_post)
+    monkeypatch.setattr(export, "vision_endpoint", lambda: ("http://10.10.10.2:11434/v1", "qwen"))
+    assert export.vision_text(b"img") == "ФОТО: дача, мангал"
+    url, payload = calls[0]
+    assert url == "http://10.10.10.2:11434/api/chat" and payload["think"] is False
+    assert payload["messages"][0]["images"] == ["aW1n"]

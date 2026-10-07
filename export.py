@@ -13,8 +13,10 @@ Three phases per run, each bounded so a run fits between two index updates:
   yet, newest end first, within ``sync_seconds``. Resumable: the next run goes
   on where this one stopped;
 * **media** (``--ocr``) — photos, image documents and PDFs become text: a PDF with
-  a text layer through ``pdftotext``, everything else through the local vision
-  model in Ollama (a document is transcribed, a photo described). The original
+  a text layer through ``pdftotext``, everything else through the vision model
+  from Hermes' own config (``auxiliary.vision``, else the main model), so it is
+  the model Hermes looks at images with (a document is transcribed, a photo
+  described). The original
   is kept next to the text, and the chat file points at both. New attachments
   (two days) are done whenever the run happens; old ones only at night
   (``HERMES_TG_USER_OCR_NIGHT``, default 23-8), when the GPU is free;
@@ -36,6 +38,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -153,23 +156,82 @@ def _night(now: datetime) -> bool:
 # --- media to text -----------------------------------------------------------------------
 
 
-def vision_text(image: bytes) -> str:
-    """Transcribe or describe one image with the local vision model (Ollama /api/chat)."""
-    model = _setting("HERMES_TG_USER_VISION_MODEL")
-    if not model:
-        raise RuntimeError("HERMES_TG_USER_VISION_MODEL is not set")
-    url = _setting("HERMES_TG_USER_OLLAMA_URL", "http://10.10.10.2:11434").rstrip("/") + "/api/chat"
-    body = json.dumps({
-        "model": model, "stream": False, "think": False, "options": {"temperature": 0},
-        "messages": [{"role": "user", "content": _VISION_PROMPT,
-                      "images": [base64.b64encode(image).decode("ascii")]}],
-    }).encode("utf-8")
-    request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-    # Ollama is on the internal network: never through an inherited proxy.
+def _hermes_config() -> dict[str, Any]:
+    """Hermes' own config.yaml, through Hermes when it is importable."""
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config()
+        if isinstance(config, dict):
+            return config
+    except Exception:
+        pass
+    try:
+        import yaml
+
+        home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser()
+        data = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def vision_endpoint() -> Optional[tuple[str, str]]:
+    """(OpenAI-style base URL, model) of the vision model Hermes is configured with.
+
+    ``auxiliary.vision`` first, the main model otherwise — the same model Hermes
+    itself uses to look at an image someone sends it. HERMES_TG_USER_VISION_MODEL
+    and HERMES_TG_USER_VISION_URL override either half.
+    """
+    config = _hermes_config()
+    main = config.get("model") if isinstance(config.get("model"), dict) else {"default": config.get("model")}
+    aux = ((config.get("auxiliary") or {}).get("vision") or {}) if isinstance(config.get("auxiliary"), dict) else {}
+    model = (_setting("HERMES_TG_USER_VISION_MODEL") or str(aux.get("model") or "")
+             or str(main.get("default") or main.get("model") or ""))
+    base = (_setting("HERMES_TG_USER_VISION_URL") or str(aux.get("base_url") or "")
+            or str(main.get("base_url") or ""))
+    if not model or not base:
+        return None
+    return base.rstrip("/"), model
+
+
+def _post(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"})
+    # The model is on the internal network: never through an inherited proxy.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(request, timeout=600) as response:
-        answer = json.loads(response.read().decode("utf-8"))
-    text = str((answer.get("message") or {}).get("content") or "")
+        return json.loads(response.read().decode("utf-8"))
+
+
+def vision_text(image: bytes, mime: str = "image/jpeg") -> str:
+    """Transcribe or describe one image with the vision model from Hermes' config.
+
+    Ollama's own /api/chat when the base URL is an Ollama /v1 (thinking off: a
+    transcription needs none), the OpenAI-compatible chat endpoint otherwise.
+    """
+    endpoint = vision_endpoint()
+    if endpoint is None:
+        raise RuntimeError("no vision model in the Hermes config (auxiliary.vision or model)")
+    base, model = endpoint
+    encoded = base64.b64encode(image).decode("ascii")
+    text = None
+    if base.endswith("/v1"):
+        try:
+            answer = _post(base[:-3] + "/api/chat", {
+                "model": model, "stream": False, "think": False, "options": {"temperature": 0},
+                "messages": [{"role": "user", "content": _VISION_PROMPT, "images": [encoded]}]})
+            text = str((answer.get("message") or {}).get("content") or "")
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:  # 404: not Ollama, use the OpenAI-compatible route below
+                raise
+    if text is None:
+        answer = _post(base + "/chat/completions", {
+            "model": model, "temperature": 0,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": _VISION_PROMPT},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}]}]})
+        text = str(((answer.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
@@ -188,7 +250,7 @@ def _pdf_text(data: bytes) -> str:
         subprocess.run(["pdftoppm", "-png", "-r", "150", "-l", str(_PDF_PAGES), str(pdf),
                         str(Path(tmp) / "page")], capture_output=True, timeout=300, check=True)
         pages = sorted(Path(tmp).glob("page*.png"))
-        texts = [vision_text(page.read_bytes()) for page in pages]
+        texts = [vision_text(page.read_bytes(), "image/png") for page in pages]
         return "\n\n".join(t for t in texts if t)
 
 
@@ -216,7 +278,7 @@ async def _media_item(client, entity, chat_dir: Path, chat: dict[str, Any], row:
     data = await client.download_media(message, file=bytes)
     if not data:
         return "skip: empty download"
-    text = _pdf_text(bytes(data)) if is_pdf else vision_text(bytes(data))
+    text = _pdf_text(bytes(data)) if is_pdf else vision_text(bytes(data), mime or "image/jpeg")
     if not text:
         return "skip: nothing recognised"
     original = Path("files") / f"{row['message_id']}{_extension(info)}"
@@ -353,7 +415,9 @@ async def export_account(out_root: Path, *, sync_seconds: float = 120, ocr: bool
                              "threads": None if entry["whole"] else entry["threads"]}
 
             # media: new attachments always, the rest only at night
-            if ocr and _setting("HERMES_TG_USER_VISION_MODEL"):
+            if ocr and vision_endpoint() is None:
+                report["errors"].append("ocr: no vision model in the Hermes config")
+            elif ocr:
                 media_deadline = time.monotonic() + ocr_seconds
                 fresh_floor = (now - _FRESH_MEDIA).timestamp()
                 night = _night(now)
@@ -376,7 +440,7 @@ async def export_account(out_root: Path, *, sync_seconds: float = 120, ocr: bool
                         outcome = await _media_item(client, chats[key]["entity"], meta[key]["dir"], meta[key], row)
                     except Exception as exc:
                         report["errors"].append(f"media {key}:{row['message_id']}: {str(exc)[:200]}")
-                        if "HERMES_TG_USER_VISION_MODEL" in str(exc) or "Connection" in str(exc):
+                        if "vision model" in str(exc) or "Connection" in str(exc) or "urlopen" in str(exc):
                             break  # the model is unreachable: no point in trying the rest now
                         outcome = f"skip: {type(exc).__name__}"
                     if outcome == "done":
