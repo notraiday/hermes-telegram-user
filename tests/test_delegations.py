@@ -216,3 +216,42 @@ def test_the_hook_is_registered_through_the_entry_point():
     assert hooks[0][1] is plugin_module("tools").delegation_approval
     manifest = (Path(__file__).resolve().parents[1] / "plugin.yaml").read_text(encoding="utf-8")
     assert "hooks:\n  - pre_tool_call\n" in manifest  # Hermes ignores hooks it was not told about
+
+
+def test_one_message_then_wait_even_when_the_model_calls_twice_at_once():
+    delegations = plugin_module("core.state.delegations")
+    with _setup() as (tools, world):
+        row = _delegate(tools)
+
+        async def both():
+            return await asyncio.gather(
+                tools._tg_dialog_message({"delegation": row["id"], "text": "Давай в баре А"}),
+                tools._tg_dialog_message({"delegation": row["id"], "text": "Давай в баре Б"}))
+
+        results = [json.loads(r) for r in _run(both())]
+        assert sorted(bool(r.get("sent")) for r in results) == [False, True]
+        assert len(world.sent) == 1  # the second one never reached Telegram
+        assert "one message at a time" in [r for r in results if not r.get("sent")][0]["error"]
+
+        again = json.loads(_run(tools._tg_dialog_message({"delegation": row["id"], "text": "Ну что?"})))
+        assert not again["sent"] and len(world.sent) == 1  # no answer yet
+
+        world.incoming(7000000001, "Давай в баре А")
+        _run(tools._tg_dialog_read({"delegation": row["id"]}))  # the answer is seen
+        assert json.loads(_run(tools._tg_dialog_message({"delegation": row["id"], "text": "До встречи!"})))["sent"]
+
+        # A reminder after the wait is allowed once more.
+        old = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+        delegations.update_delegation(row["id"], last_sent_at=old)
+        assert json.loads(_run(tools._tg_dialog_message({"delegation": row["id"], "text": "Напоминаю"})))["sent"]
+        assert len(world.sent) == 3
+
+
+def test_a_failed_send_gives_the_slot_back():
+    with _setup() as (tools, world):
+        row = _delegate(tools)
+        world.history.pop(7000000001)  # the chat vanished: sending fails
+        failed = _run(tools._tg_dialog_message({"delegation": row["id"], "text": "Привет"}))
+        assert "error" in failed and world.sent == []
+        world.history[7000000001] = [(10, False, "Здравствуйте")]
+        assert json.loads(_run(tools._tg_dialog_message({"delegation": row["id"], "text": "Привет"})))["sent"]

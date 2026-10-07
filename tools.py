@@ -50,7 +50,9 @@ from .core.state.collections import (
 )
 from .core.state.delegations import (
     active_peer_ids,
+    claim_send,
     close_delegation,
+    finish_send,
     get_delegation,
     list_delegations,
     record_read,
@@ -2435,7 +2437,8 @@ async def _tg_dialog_read(args: dict[str, Any], **_: Any) -> str:
             fresh = not getattr(message, "out", False) and int(message.id) > seen
             lines.append(("* " if fresh else "  ") + line)
         up_to = max((int(m.id) for m in msgs), default=0)
-        record_read(row["id"], up_to, mark_seen=bool(args.get("mark_seen", False)))
+        incoming = max((int(m.id) for m in msgs if not getattr(m, "out", False)), default=0)
+        record_read(row["id"], up_to, mark_seen=bool(args.get("mark_seen", False)), incoming_up_to=incoming)
         head = [
             f"Поручение {row['id']} · {row['chat']} · до {_inbox_time(row['expires_at'])}"
             + ("" if row["active"] else f" · {row['status']}, писать нельзя"),
@@ -2457,10 +2460,17 @@ async def _tg_dialog_message(args: dict[str, Any], **_: Any) -> str:
         text = str(args.get("text") or "")
         if not text.strip():
             return _json({"error": "text is required"})
-        async with tool_client() as client:
-            entity = await _delegation_entity(client, row)
-            reply_to = int(args["reply_to"]) if args.get("reply_to") not in (None, "") else None
-            msg = await client.send_message(entity, text, reply_to=reply_to)
+        allowed, reason = claim_send(row["id"])
+        if not allowed:
+            return _json({"error": reason, "sent": False, "delegation": row["id"]})
+        msg = None
+        try:
+            async with tool_client() as client:
+                entity = await _delegation_entity(client, row)
+                reply_to = int(args["reply_to"]) if args.get("reply_to") not in (None, "") else None
+                msg = await client.send_message(entity, text, reply_to=reply_to)
+        finally:
+            finish_send(row["id"], int(msg.id) if msg is not None else None)
         # What was read before answering counts as seen; a reply that arrived after
         # the read stays new and wakes the dialogs job again.
         update_delegation(row["id"], last_seen_id=max(int(row.get("last_seen_id") or 0),
@@ -2495,6 +2505,9 @@ async def delegations_peek() -> dict[str, Any]:
                 seen = int(row.get("last_seen_id") or 0)
                 fresh = [m async for m in client.iter_messages(entity, limit=20, min_id=seen)
                          if not getattr(m, "out", False)]
+                if fresh:  # the other side answered: the agent may write again
+                    record_read(row["id"], 0, mark_seen=False,
+                                incoming_up_to=max(int(m.id) for m in fresh))
                 if fresh:
                     waiting.append({"id": row["id"], "chat": row["chat"], "goal": row["goal"],
                                     "new_messages": len(fresh)})
@@ -3123,7 +3136,7 @@ _TOOL_DEFS = [
     ),
     (
         "tg_dialog_message",
-        "Write in a delegated dialog without asking the owner: only to that chat, only while the delegation is active, from the account the delegation was made on (read-only ones included).",
+        "Write in a delegated dialog without asking the owner: only to that chat, only while the delegation is active, from the account the delegation was made on (read-only ones included). One message, then wait for the other side: a second message before their answer is refused (a reminder is allowed after 3 h), so put everything into one message and never call this twice in a turn.",
         _tg_dialog_message,
         _obj({"delegation": {"type": "string"}, "text": {"type": "string"},
               "reply_to": {"type": "integer", "description": "Message id to reply to."}},

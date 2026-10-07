@@ -24,7 +24,9 @@ from .paths import StateLock, private_file, state_dir
 
 __all__ = [
     "active_peer_ids",
+    "claim_send",
     "close_delegation",
+    "finish_send",
     "get_delegation",
     "is_active",
     "list_delegations",
@@ -35,6 +37,8 @@ __all__ = [
 
 _FILENAME = "delegations.json"
 _TEXT_LIMIT = 2000
+#: After writing, the agent waits for the other side; it may nudge once this has passed.
+NUDGE_AFTER = timedelta(hours=3)
 
 
 def _path() -> Path:
@@ -150,8 +154,14 @@ def update_delegation(delegation_id: str, **fields: Any) -> Optional[dict[str, A
     return None
 
 
-def record_read(delegation_id: str, up_to: int, *, mark_seen: bool) -> Optional[dict[str, Any]]:
-    """Remember how far the agent has read; with mark_seen, stop waking on those messages."""
+def record_read(delegation_id: str, up_to: int, *, mark_seen: bool,
+                incoming_up_to: int = 0) -> Optional[dict[str, Any]]:
+    """Remember how far the agent has read; with mark_seen, stop waking on those messages.
+
+    ``incoming_up_to`` is the newest message from the other side that was shown:
+    once it is past our last message, the other side has answered and the agent
+    may write again.
+    """
     with _LOCK:
         rows = _load_unlocked()
         for row in rows:
@@ -159,9 +169,58 @@ def record_read(delegation_id: str, up_to: int, *, mark_seen: bool) -> Optional[
                 row["read_up_to"] = max(int(row.get("read_up_to") or 0), int(up_to))
                 if mark_seen:
                     row["last_seen_id"] = max(int(row.get("last_seen_id") or 0), row["read_up_to"])
+                if incoming_up_to and int(incoming_up_to) > int(row.get("last_sent_id") or 0):
+                    row["awaiting_reply"] = False
                 _save_unlocked(rows)
                 return _public(row)
     return None
+
+
+def claim_send(delegation_id: str) -> tuple[bool, str]:
+    """Take the one message slot, or say why not: one message, then wait for an answer.
+
+    Check and claim happen under one lock with no I/O in between, so two calls
+    made in parallel cannot both pass: the second sees the slot taken.
+    """
+    now = _now()
+    with _LOCK:
+        rows = _load_unlocked()
+        for row in rows:
+            if row["id"] != str(delegation_id):
+                continue
+            if row.get("awaiting_reply"):
+                try:
+                    since = datetime.fromisoformat(str(row.get("last_sent_at")))
+                except ValueError:
+                    since = now
+                if now - since < NUDGE_AFTER:
+                    return False, (
+                        "already wrote in this dialog and the other side has not answered yet: "
+                        "one message at a time — put everything into one message, and wait "
+                        f"(a reminder is allowed {int(NUDGE_AFTER.total_seconds() // 3600)} h after "
+                        "the last message). If an answer did come, read it with tg_dialog_read first.")
+            row["awaiting_reply"] = True
+            row["previous_sent_at"] = row.get("last_sent_at")
+            row["last_sent_at"] = now.isoformat()
+            _save_unlocked(rows)
+            return True, ""
+    return False, "unknown delegation"
+
+
+def finish_send(delegation_id: str, message_id: Optional[int]) -> None:
+    """Record the sent message; None means the send failed and the slot is given back."""
+    with _LOCK:
+        rows = _load_unlocked()
+        for row in rows:
+            if row["id"] == str(delegation_id):
+                if message_id is None:
+                    row["awaiting_reply"] = False
+                    row["last_sent_at"] = row.pop("previous_sent_at", None)
+                else:
+                    row["last_sent_id"] = max(int(row.get("last_sent_id") or 0), int(message_id))
+                    row.pop("previous_sent_at", None)
+                _save_unlocked(rows)
+                return
 
 
 def close_delegation(delegation_id: str, outcome: str, status: str = "closed") -> Optional[dict[str, Any]]:
