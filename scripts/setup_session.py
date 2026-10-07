@@ -31,7 +31,8 @@ if __name__ == "__main__":
     parser.add_argument("--proxy", default=None)
     parser.add_argument("--env", type=Path, default=None)
     parser.add_argument("--print-only", action="store_true")
+    parser.add_argument("--qr", action="store_true")
     a = parser.parse_args()
     raise SystemExit(
-        run_login(a.env, print_only=a.print_only, account=a.account, mode=a.mode, proxy=a.proxy)
+        run_login(a.env, print_only=a.print_only, account=a.account, mode=a.mode, proxy=a.proxy, qr=a.qr)
     )

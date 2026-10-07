@@ -18,6 +18,8 @@ hermes telegram-user login --account personal --mode read  [--proxy socks5://hos
 hermes telegram-user login --account agent    --mode write [--proxy socks5://host:port]
 ```
 
+If Telegram never delivers the login code (it happens with new API ids and logins through a proxy), add `--qr` and scan the code in the terminal with your phone: Telegram → Settings → Devices → Link Desktop Device.
+
 Each login writes `HERMES_TG_USER_<NAME>_SESSION`, `_MODE`, `_PROXY` and adds the account to `HERMES_TG_USER_ACCOUNTS` in the Hermes `.env`. Restart Hermes afterwards.
 
 ---

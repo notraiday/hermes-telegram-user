@@ -52,6 +52,11 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
         help="proxy for this account: socks5://host:port, http://host:port or mtproxy://secret@host:port",
     )
     login.add_argument(
+        "--qr",
+        action="store_true",
+        help="log in by scanning a QR code with your phone instead of typing a code",
+    )
+    login.add_argument(
         "--print-only",
         action="store_true",
         help="print the session instead of storing it (it is not echoed otherwise)",
@@ -69,4 +74,5 @@ def login_command(args: argparse.Namespace) -> int:
         account=str(getattr(args, "account", None) or "default"),
         mode=getattr(args, "mode", None),
         proxy=getattr(args, "proxy", None),
+        qr=bool(getattr(args, "qr", False)),
     )

@@ -1,6 +1,6 @@
 name: telegram-user
 label: Telegram User (MTProto)
-version: "0.12.0+rai.1"
+version: "0.12.0+rai.2"
 description: Tools over one or more Telegram user accounts (MTProto) — each read-only or read-write, each with its own proxy. Reading, search, unread/folder/inbox digests with local marks, collections, archive with offline search, media and voice transcripts; on write accounts also sending, replies, files, forwards, reactions, edits, deletions, pins and read marks. No chat platform — talk to Hermes through the regular Telegram bot.
 author: community
 # Declared here, not only in requirements.txt: Hermes installs these into its own
@@ -10,6 +10,7 @@ author: community
 python_dependencies:
   - "telethon>=1.44,<2"
   - "python-socks[asyncio]>=2.4,<3"
+  - "qrcode>=7"
 requires_env:
   - name: HERMES_TG_USER_API_ID
     description: Telegram API ID from my.telegram.org

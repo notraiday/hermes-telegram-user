@@ -126,6 +126,74 @@ async def _login(api_id: int, api_hash: str, proxy: Optional[str] = None) -> str
         await client.disconnect()
 
 
+def _print_qr(url: str) -> None:
+    """Draw the login QR in the terminal; the URL itself is never sent anywhere."""
+    try:
+        import qrcode
+
+        qr = qrcode.QRCode(border=2)
+        qr.add_data(url)
+        qr.make(fit=True)
+        qr.print_ascii(invert=True)
+    except ImportError:
+        print(
+            "Package 'qrcode' is not installed, so the QR cannot be drawn here.\n"
+            "Install it into Hermes' Python (pip install qrcode) and run again.\n"
+            "Do not paste the link below into online QR generators: it is a login token.",
+            file=sys.stderr,
+        )
+        print(url)
+
+
+async def _login_qr(api_id: int, api_hash: str, proxy: Optional[str] = None) -> str:
+    """Log in by scanning a QR code with an already logged-in Telegram app.
+
+    Needed when Telegram accepts the code request but never delivers the code,
+    which happens for new API ids and logins from data-centre IPs (proxies).
+    """
+    import asyncio
+    import getpass
+
+    from telethon import TelegramClient
+    from telethon.errors import SessionPasswordNeededError
+    from telethon.sessions import StringSession
+
+    from .accounts import telethon_proxy_kwargs
+
+    client = TelegramClient(StringSession(), api_id, api_hash, **telethon_proxy_kwargs(proxy))
+    await client.connect()
+    try:
+        qr = await client.qr_login()
+        for _attempt in range(10):
+            print(
+                "\nOn your phone: Telegram -> Settings -> Devices -> Link Desktop Device, "
+                "then scan this code (it refreshes every ~30 s):\n"
+            )
+            _print_qr(qr.url)
+            try:
+                await qr.wait(timeout=30)
+                break
+            except asyncio.TimeoutError:
+                await qr.recreate()
+            except SessionPasswordNeededError:
+                for _try in range(3):
+                    try:
+                        await client.sign_in(password=getpass.getpass("2FA password: "))
+                        break
+                    except Exception as exc:  # wrong password: ask again
+                        print(f"  {exc}", file=sys.stderr)
+                else:
+                    raise RuntimeError("2FA password was not accepted")
+                break
+        else:
+            raise RuntimeError("QR code was not scanned in time")
+        if not await client.is_user_authorized():
+            raise RuntimeError("login did not complete")
+        return client.session.save()
+    finally:
+        await client.disconnect()
+
+
 def run_login(
     env_path: Optional[Path] = None,
     *,
@@ -133,6 +201,7 @@ def run_login(
     account: str = "default",
     mode: Optional[str] = None,
     proxy: Optional[str] = None,
+    qr: bool = False,
 ) -> int:
     """Log in one account, then store its session (and mode/proxy). Returns an exit code."""
     import asyncio
@@ -170,7 +239,8 @@ def run_login(
 
     proxy = (proxy or value(env_key(account, "PROXY")) or "").strip() or None
     try:
-        session = asyncio.run(_login(api_id, api_hash, proxy))
+        login = _login_qr if qr else _login
+        session = asyncio.run(login(api_id, api_hash, proxy))
     except ModuleNotFoundError as exc:
         print(
             f"Missing Python package ({exc.name}).\n"
