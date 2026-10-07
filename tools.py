@@ -23,6 +23,7 @@ from .core.folders import (
 )
 from .core.helpers import (
     bounded_int,
+    button_kind,
     configured_media_limit_bytes,
     find_topic_root,
     kind_has_media_payload,
@@ -2007,6 +2008,12 @@ def _inbox_line(row: dict[str, Any]) -> str:
     urls = row.get("link_urls")
     if urls:
         text = f"{text} {' '.join(str(u) for u in urls)}".strip()
+    keyboard = row.get("keyboard")
+    if isinstance(keyboard, dict):
+        marks = {"url": " ↗", "switch_inline": " (inline)"}
+        labels = [f"{b['text']}{marks.get(b['kind'], '')}" for r in keyboard.get("rows", []) for b in r]
+        kind = "клавиатура" if keyboard.get("type") == "reply" else "кнопки"
+        text = f"{text} [{kind}: {' | '.join(labels)}]".strip()
     head = f"[{_inbox_time(row.get('date'))}] #{row.get('id')} {who}"
     if extras:
         head += " " + " ".join(extras)
@@ -2338,10 +2345,12 @@ def delegation_approval(*args: Any, **kwargs: Any) -> Optional[dict[str, Any]]:
     """
     try:
         tool_name = kwargs.get("tool_name", args[0] if args else None)
-        if tool_name != "tg_delegate_dialog":
+        if tool_name not in ("tg_delegate_dialog", "tg_click_button"):
             return None
         call = kwargs.get("args", args[1] if len(args) > 1 else None) or {}
         call = call if isinstance(call, dict) else {}
+        if tool_name == "tg_click_button":
+            return _risky_click_approval(call)
         hours = bounded_int(call.get("hours"), 72, 1, 720)
         account = str(call.get("account") or default_account() or "")
         lines = [
@@ -2513,6 +2522,171 @@ async def delegations_peek() -> dict[str, Any]:
                                     "new_messages": len(fresh)})
     return {"account": current_account() or default_account(), "active": len(active),
             "waiting": waiting, "expired": expired}
+
+
+# --- bots: buttons and inline mode ---------------------------------------------------
+#
+# Pressing a button is acting on the account's behalf. Write accounts may do it
+# anywhere, read-only ones only in a chat they hold a delegation for. Buttons that
+# would hand over the phone number, a location, a payment, a login or open a web
+# app are never pressed; a button whose label reads like money, an order, a
+# confirmation or a deletion asks the owner first (the same hook as delegations).
+
+_RISKY_BUTTON = re.compile(
+    r"оплат|плат[её]ж|купи|покупк|заказ|оформ|подтверд|удал|отмен|перев[её]д|подпис|спис|"
+    r"pay|buy|purchase|order|checkout|confirm|delete|remove|cancel|subscribe|transfer",
+    re.IGNORECASE)
+_CLICKABLE = {"callback", "text"}
+
+
+def _risky_click_approval(call: dict[str, Any]) -> Optional[dict[str, Any]]:
+    label = str(call.get("text") or "")
+    if not _RISKY_BUTTON.search(label):
+        return None
+    digest = hashlib.sha256(json.dumps(call, sort_keys=True, ensure_ascii=False,
+                                       default=str).encode("utf-8")).hexdigest()[:16]
+    return {"action": "approve", "rule_key": f"tg_click_button:{digest}",
+            "message": (f"Нажать кнопку «{sanitize_name(label, limit=128)}» в чате "
+                        f"{sanitize_name(call.get('chat'), limit=128)} (сообщение "
+                        f"{sanitize_name(call.get('message_id') or 'последнее с кнопками', limit=32)})?")}
+
+
+def _may_act_in(entity: Any) -> None:
+    acc = get_account()
+    if acc.writable or peer_id(entity) in active_peer_ids():
+        return
+    raise PermissionError(
+        f"account {acc.name!r} is read-only: it can act in a chat only under a delegation "
+        "(tg_delegate_dialog) for that chat")
+
+
+def _find_button(message: Any, text: str, row: Any = None, column: Any = None):
+    rows = getattr(message, "buttons", None) or []
+    if row not in (None, "") and column not in (None, ""):
+        try:
+            return rows[int(row) - 1][int(column) - 1]
+        except (IndexError, ValueError, TypeError):
+            raise ValueError("no button at that row/column") from None
+    wanted = text.strip().casefold()
+    flat = [b for r in rows for b in r]
+    exact = [b for b in flat if str(getattr(b, "text", "")).strip().casefold() == wanted]
+    if len(exact) == 1:
+        return exact[0]
+    partial = exact or [b for b in flat if wanted and wanted in str(getattr(b, "text", "")).casefold()]
+    if len(partial) == 1:
+        return partial[0]
+    labels = " | ".join(str(getattr(b, "text", "")) for b in flat)
+    if partial:
+        raise ValueError(f"several buttons match {text!r}; pass row and column. Buttons: {labels}")
+    raise ValueError(f"no button {text!r}. Buttons: {labels}")
+
+
+async def _tg_click_button(args: dict[str, Any], **_: Any) -> str:
+    try:
+        chat = str(args.get("chat") or "").strip()
+        label = str(args.get("text") or "").strip()
+        if not chat or not label:
+            return _json({"error": "chat and text (the button's label) are required"})
+        raw_wait = args.get("wait")
+        wait = min(max(float(raw_wait) if raw_wait not in (None, "") else 2.0, 0.0), 10.0)
+        async with tool_client() as client:
+            entity = await resolve_chat(client, chat)
+            _may_act_in(entity)
+            if args.get("message_id") in (None, ""):
+                message = None
+                async for candidate in client.iter_messages(entity, limit=10):
+                    if getattr(candidate, "buttons", None):
+                        message = candidate
+                        break
+            else:
+                message = await client.get_messages(entity, ids=int(args["message_id"]))
+            if message is None or not getattr(message, "buttons", None):
+                return _json({"error": "that message has no buttons"})
+            button = _find_button(message, label, args.get("row"), args.get("column"))
+            kind = button_kind(button)
+            if kind == "url":
+                return _json({"url": getattr(button, "url", None), "pressed": False,
+                              "note": "A link button: not opened. Fetch the page if it is needed."})
+            if kind == "switch_inline":
+                return _json({"inline_query": getattr(button, "inline_query", None), "pressed": False,
+                              "note": "Use tg_inline_query with this bot and query."})
+            if kind == "copy":
+                raw = getattr(getattr(button, "button", None), "type", None)
+                return _json({"copy_text": getattr(raw, "copy_text", None), "pressed": False})
+            if kind not in _CLICKABLE:
+                return _json({"error": f"the plugin does not press {kind} buttons: they hand over "
+                                       "the phone, a location, a payment, a login or open a web app; "
+                                       "ask the owner", "pressed": False})
+            result = await button.click()
+            answer = None
+            if kind == "callback" and result is not None:
+                answer = {k: getattr(result, k, None) for k in ("message", "alert", "url")}
+                answer = {k: v for k, v in answer.items() if v}
+            if wait:
+                await asyncio.sleep(wait)
+            after = [m async for m in client.iter_messages(entity, limit=5)]
+            after.reverse()
+            if all(int(m.id) != int(message.id) for m in after):
+                refreshed = await client.get_messages(entity, ids=int(message.id))
+                if refreshed is not None:
+                    after.insert(0, refreshed)
+        lines = [_inbox_line(message_to_dict(m, chat=entity)) for m in after]
+        head = f"Нажата «{getattr(button, 'text', label)}» (сообщение #{message.id})."
+        if answer:
+            head += f" Ответ бота: {sanitize_text(json.dumps(answer, ensure_ascii=False), limit=1000)}"
+        return head + "\nСейчас в чате (последние сообщения, кнопки обновлены):\n" + "\n".join(lines)
+    except Exception as exc:
+        return _error(exc)
+
+
+async def _tg_inline_query(args: dict[str, Any], **_: Any) -> str:
+    try:
+        bot = str(args.get("bot") or "").strip()
+        query = str(args.get("query") or "")
+        if not bot:
+            return _json({"error": "bot is required"})
+        async with tool_client() as client:
+            bot_entity = await resolve_chat(client, bot)
+            target = await resolve_chat(client, str(args["chat"])) if args.get("chat") else None
+            results = await client.inline_query(bot_entity, query, entity=target)
+        rows = []
+        for index, result in enumerate(list(results)[:20]):
+            rows.append({k: v for k, v in {
+                "index": index,
+                "id": getattr(getattr(result, "result", None), "id", None),
+                "type": getattr(result, "type", None),
+                "title": sanitize_text(getattr(result, "title", None) or "", limit=300),
+                "description": sanitize_text(getattr(result, "description", None) or "", limit=500),
+                "url": getattr(result, "url", None),
+            }.items() if v not in (None, "")})
+        return _json({"bot": entity_label(bot_entity), "query": query, "count": len(rows), "results": rows,
+                      "note": "Send one with tg_send_inline_result(bot, query, chat, id)."})
+    except Exception as exc:
+        return _error(exc)
+
+
+async def _tg_send_inline_result(args: dict[str, Any], **_: Any) -> str:
+    try:
+        bot = str(args.get("bot") or "").strip()
+        chat = str(args.get("chat") or "").strip()
+        if not bot or not chat:
+            return _json({"error": "bot and chat are required"})
+        async with tool_client() as client:
+            bot_entity = await resolve_chat(client, bot)
+            target = await resolve_chat(client, chat)
+            _may_act_in(target)
+            results = list(await client.inline_query(bot_entity, str(args.get("query") or ""), entity=target))
+            wanted = str(args.get("id") or "")
+            pick = next((r for r in results if wanted and str(getattr(getattr(r, "result", None), "id", "")) == wanted), None)
+            if pick is None and args.get("index") not in (None, ""):
+                index = int(args["index"])
+                pick = results[index] if 0 <= index < len(results) else None
+            if pick is None:
+                return _json({"error": "that result is gone; run tg_inline_query again"})
+            message = await pick.click(target)
+        return _json({"sent": True, **_sent(target, message)})
+    except Exception as exc:
+        return _error(exc)
 
 
 def _obj(properties: dict[str, Any], required: Optional[list[str]] = None) -> dict[str, Any]:
@@ -3147,6 +3321,39 @@ _TOOL_DEFS = [
         "Close a delegated dialog when the goal is reached or abandoned; the agent can no longer write there.",
         _tg_close_delegation,
         _obj({"delegation": {"type": "string"}, "outcome": {"type": "string"}}, ["delegation", "outcome"]),
+    ),
+    (
+        "tg_click_button",
+        f"Press a button under a bot's message: inline (callback) buttons or the bot's reply keyboard (sends the label). Waits briefly and returns the bot's answer and the latest messages with their updated buttons, so do not poll. Link buttons return the URL; buttons that share the phone, a location, a payment, a login or open a web app are refused. Labels about paying, ordering, confirming or deleting ask the owner first. Write accounts, or a read-only one inside a delegated chat. {_UNTRUSTED}",
+        _tg_click_button,
+        _obj(
+            {
+                "chat": _CHAT,
+                "text": {"type": "string", "description": "The button's label as shown."},
+                "message_id": {"type": "integer", "description": "Message with the buttons; default the latest one that has buttons."},
+                "row": {"type": "integer", "description": "1-based row, only to tell identical labels apart."},
+                "column": {"type": "integer", "description": "1-based column, with row."},
+                "wait": {"type": "number", "description": "Seconds to wait for the bot before reading back (0-10, default 2)."},
+            },
+            ["chat", "text"],
+        ),
+    ),
+    (
+        "tg_inline_query",
+        f"Ask a bot in inline mode (like typing @bot query): returns its results with ids. Sends nothing. {_UNTRUSTED}",
+        _tg_inline_query,
+        _obj({"bot": _CHAT, "query": {"type": "string"},
+              "chat": {**_CHAT, "description": "The chat the result is meant for, if the bot cares."}},
+             ["bot"]),
+    ),
+    (
+        "tg_send_inline_result",
+        "Send one result of a bot's inline query into a chat. Write accounts, or a read-only one inside a delegated chat.",
+        _tg_send_inline_result,
+        _obj({"bot": _CHAT, "query": {"type": "string"}, "chat": _CHAT,
+              "id": {"type": "string", "description": "Result id from tg_inline_query."},
+              "index": {"type": "integer", "description": "Result index, if there is no id."}},
+             ["bot", "chat"]),
     ),
 ]
 

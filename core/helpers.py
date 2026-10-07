@@ -111,6 +111,61 @@ def _button_texts(message: Any) -> list[str]:
     return out[:50]
 
 
+# Button kinds by Telethon's button type. "callback" and "text" are what an agent
+# may press; the rest either only carry data (url, copy, profile), switch to inline
+# mode, or hand over something the owner has not offered (phone, location, a
+# payment, a login, a web app) and are never pressed by the plugin.
+_BUTTON_KINDS = {
+    "InlineButtonTypeCallback": "callback",
+    "ButtonTypeDefault": "text",
+    "InlineButtonTypeUrl": "url",
+    "InlineButtonTypeSwitchInline": "switch_inline",
+    "InlineButtonTypeCopy": "copy",
+    "InlineButtonTypeUserProfile": "profile",
+    "InlineButtonTypeGame": "game",
+    "InlineButtonTypeBuy": "payment",
+    "InlineButtonTypeUrlAuth": "login",
+    "InlineButtonTypeWebView": "webapp",
+    "ButtonTypeSimpleWebView": "webapp",
+    "ButtonTypeRequestPhone": "phone",
+    "ButtonTypeRequestGeoLocation": "location",
+    "ButtonTypeRequestPeer": "choose_chat",
+    "ButtonTypeRequestPoll": "poll",
+    "InlineButtonTypeDisabled": "disabled",
+}
+
+
+def button_kind(button: Any) -> str:
+    raw = getattr(getattr(button, "button", None), "type", None)
+    return _BUTTON_KINDS.get(type(raw).__name__, "other")
+
+
+def keyboard_of(message: Any) -> Optional[dict[str, Any]]:
+    """The message's keyboard: inline or reply, rows of {text, kind[, url]}."""
+    try:
+        rows = getattr(message, "buttons", None) or []
+        out_rows = []
+        for row in rows:
+            out_row = []
+            for button in row:
+                text = sanitize_name(getattr(button, "text", None), limit=256)
+                if not text:
+                    continue
+                item: dict[str, Any] = {"text": text, "kind": button_kind(button)}
+                url = getattr(button, "url", None)
+                if url:
+                    item["url"] = sanitize_text(url, limit=2048)
+                out_row.append(item)
+            if out_row:
+                out_rows.append(out_row)
+    except Exception:
+        return None
+    if not out_rows:
+        return None
+    markup = type(getattr(message, "reply_markup", None)).__name__
+    return {"type": "reply" if markup == "ReplyKeyboardMarkup" else "inline", "rows": out_rows[:20]}
+
+
 def _hidden_urls(message: Any) -> list[str]:
     out: list[str] = []
     for entity in getattr(message, "entities", None) or []:
@@ -230,6 +285,9 @@ def message_to_dict(message: Any, *, chat: Any = None) -> dict[str, Any]:
     buttons = _button_texts(message)
     if buttons:
         row["buttons"] = buttons
+        keyboard = keyboard_of(message)
+        if keyboard:
+            row["keyboard"] = keyboard
     urls = _hidden_urls(message)
     if urls:
         row["link_urls"] = urls

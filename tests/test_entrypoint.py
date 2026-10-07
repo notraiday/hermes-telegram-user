@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _plugin_support import isolated_state, plugin_package  # noqa: E402
 
-EXPECTED_TOOL_COUNT = 51
+EXPECTED_TOOL_COUNT = 54
 
 STUBBED = (
     "gateway",
