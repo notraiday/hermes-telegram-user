@@ -1809,14 +1809,17 @@ def _inbox_member_threads(args: dict[str, Any]) -> dict[str, list[tuple[Optional
     return member_threads
 
 
-async def _inbox_scopes(client, args: dict[str, Any], member_threads) -> dict[tuple[str, Optional[str]], dict[str, Any]]:
+async def _inbox_scopes(client, args: dict[str, Any], member_threads, *,
+                        skip_delegated: bool = True) -> dict[tuple[str, Optional[str]], dict[str, Any]]:
     """Every (chat, thread) the inbox covers, with the dialog's top message id."""
     include_saved = bool(args.get("include_saved", True))
     include_private = bool(args.get("include_private", True))
     include_bots = bool(args.get("include_bots", False))
     include_service = bool(args.get("include_service", False))
     scopes: dict[tuple[str, Optional[str]], dict[str, Any]] = {}
-    delegated = active_peer_ids()  # the dialogs job owns these chats while the delegation lasts
+    # The dialogs job owns delegated chats while the delegation lasts; the memory
+    # export still wants them (skip_delegated=False).
+    delegated = active_peer_ids() if skip_delegated else set()
     async for dialog in client.iter_dialogs():
         entity = dialog.entity
         key = peer_id(entity)

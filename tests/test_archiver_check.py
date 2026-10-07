@@ -198,6 +198,14 @@ class _Davis:
                                     f"<d:getetag>\"x\"</d:getetag></d:prop>{ok}</d:propstat></d:response>")
                     self._reply(xml + f"<d:sync-token>http://sabre/sync/{davis.version}</d:sync-token>")
                     return
+                if "calendar-query" in body:
+                    xml = ""
+                    for href, ics in davis.events.items():
+                        data = ics.replace("&", "&amp;").replace("<", "&lt;")
+                        xml += (f"<d:response><d:href>{href}</d:href><d:propstat><d:prop>"
+                                f"<c:calendar-data>{data}</c:calendar-data></d:prop>{ok}</d:propstat></d:response>")
+                    self._reply(xml)
+                    return
                 xml = ""
                 for href in body.split("<d:href>")[1:]:
                     href = href.split("</d:href>")[0]
@@ -303,3 +311,33 @@ def test_the_dialogs_check_wakes_only_on_answers_or_expiry(tmp_path):
     out = run({"accounts": [{"account": "agent", "waiting": [], "expired": [
         {"id": "d4e5f6", "chat": "salon", "goal": "стрижка"}]}]})
     assert "## Истекли" in out and "d4e5f6" in out
+
+
+def test_calendar_export_writes_months_in_local_time_and_drops_empty_ones(world, tmp_path):
+    spec = importlib.util.spec_from_file_location("calendar_export", ROOT / "memory" / "calendar_export.py")
+    export = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(export)
+    davis = _Davis()
+    davis.put("/dav/calendars/raiday/default/e2.ics",
+              "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:u2\nSUMMARY:Стоматолог\nDTSTART:20261115T060000Z\n"
+              "DTEND:20261115T070000Z\nLOCATION:Клиника на Мира\nDESCRIPTION:взять снимок\nEND:VEVENT\nEND:VCALENDAR\n")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), davis.handler())
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    out = tmp_path / "calendar"
+    try:
+        with _env(DAVIS_URL=f"http://127.0.0.1:{server.server_port}", DAVIS_USER="raiday",
+                  DAVIS_PASSWORD="secret", HERMES_TIMEZONE="Europe/Moscow"):
+            assert export.main(["x", str(out)]) == 0
+            nov = (out / "2026-11.md").read_text(encoding="utf-8")
+            assert "# Календарь — ноябрь 2026" in nov
+            assert "## 15.11 (вс) 09:00–10:00 · Стоматолог" in nov  # 06:00Z is 09:00 in Moscow
+            assert "Календарь: Личное · Место: Клиника на Мира" in nov and "Описание: взять снимок" in nov
+            assert (out / "2026-10.md").exists()  # the haircut on 10.10
+            assert export.main(["x", str(out)]) == 0
+            assert (out / "2026-11.md").read_text(encoding="utf-8") == nov  # unchanged: not rewritten
+
+            davis.delete("/dav/calendars/raiday/default/e2.ics")
+            assert export.main(["x", str(out)]) == 0
+            assert not (out / "2026-11.md").exists()  # the month emptied: its file is gone
+    finally:
+        server.shutdown()

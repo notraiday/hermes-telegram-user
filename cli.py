@@ -16,7 +16,7 @@ import argparse
 import sys
 from pathlib import Path
 
-__all__ = ["dialogs_command", "inbox_command", "login_command", "register_cli", "run_command"]
+__all__ = ["dialogs_command", "export_command", "inbox_command", "login_command", "register_cli", "run_command"]
 
 
 def register_cli(subparser: argparse.ArgumentParser) -> None:
@@ -105,6 +105,26 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     )
     inbox.set_defaults(func=run_command)
 
+    export = actions.add_parser(
+        "export",
+        help="Write the inbox chats as markdown for the memory search",
+        description=(
+            "Brings the plugin's archive up to date (new messages first, then older history, "
+            "within --sync-seconds), optionally turns photos and documents into text with the "
+            "local vision model (--ocr; old ones only at night), and writes one markdown file "
+            "per chat per month under DIR/<account>/. Prints one JSON line per run."
+        ),
+    )
+    export.add_argument("--markdown", type=Path, required=True, metavar="DIR", help="output directory")
+    export.add_argument("--account", action="append", default=None,
+                        help="account to export; repeat for several (default: every configured account)")
+    export.add_argument("--sync-seconds", type=float, default=120.0, help="time for archive sync per account")
+    export.add_argument("--ocr", action="store_true", help="also turn photos and documents into text")
+    export.add_argument("--ocr-seconds", type=float, default=240.0, help="time for media per account")
+    export.add_argument("--env", type=Path, default=None,
+                        help="dotenv file to read the accounts from (default: the Hermes .env)")
+    export.set_defaults(func=run_command)
+
     dialogs = actions.add_parser(
         "dialogs",
         help="Check delegated dialogs for answers the agent has not seen",
@@ -129,6 +149,8 @@ def run_command(args: argparse.Namespace) -> int:
         return inbox_command(args)
     if action == "dialogs":
         return dialogs_command(args)
+    if action == "export":
+        return export_command(args)
     return login_command(args)
 
 
@@ -239,4 +261,35 @@ def dialogs_command(args: argparse.Namespace) -> int:
     waiting = sum(len(row.get("waiting") or []) for row in rows)
     expired = sum(len(row.get("expired") or []) for row in rows)
     print(json.dumps({"waiting": waiting, "expired": expired, "accounts": rows}, ensure_ascii=False))
+    return 1 if failed else 0
+
+
+def export_command(args: argparse.Namespace) -> int:
+    """``hermes telegram-user export --markdown DIR [--ocr]``: one JSON line, per account."""
+    import asyncio
+    import json
+
+    _load_account_env(getattr(args, "env", None))
+    from .core.accounts import account_names, use_account
+    from .export import export_account
+
+    out = Path(args.markdown).expanduser()
+    out.mkdir(parents=True, exist_ok=True)
+    out.chmod(0o700)
+    try:
+        names = [n.strip().lower() for n in (getattr(args, "account", None) or account_names())]
+    except Exception as exc:
+        print(json.dumps({"error": str(exc)}, ensure_ascii=False))
+        return 1
+    rows, failed = [], False
+    for name in names:
+        try:
+            with use_account(name):
+                rows.append(asyncio.run(export_account(
+                    out, sync_seconds=float(args.sync_seconds), ocr=bool(args.ocr),
+                    ocr_seconds=float(args.ocr_seconds))))
+        except Exception as exc:
+            failed = True
+            rows.append({"account": name, "error": str(exc) or type(exc).__name__})
+    print(json.dumps({"accounts": rows}, ensure_ascii=False))
     return 1 if failed else 0
