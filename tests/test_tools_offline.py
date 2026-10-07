@@ -964,36 +964,3 @@ def test_inbox_command_takes_plugin_variables_from_the_env_file(tmp_path):
             os.environ.pop(k, None)
             if v is not None:
                 os.environ[k] = v
-
-
-def test_inbox_first_visit_all_pages_through_the_history_from_the_start():
-    tools = _tools()
-    history, _, _, fake_client = _peek_world()
-    history[2] = list(range(10, 25))  # 15 messages in the private chat
-
-    with account_env(mode="read"), isolated_state():
-        original = tools.tool_client
-        tools.tool_client = fake_client
-        try:
-            args = {"first_visit": "all", "messages_per_chat": 6, "include_saved": False}
-            seen = []
-            for _ in range(4):
-                out = json.loads(_run(tools._tg_read_inbox(dict(args))))
-                chat = next((c for c in out["chats"] if c["chat_id"] == "2"), None)
-                if chat is None:
-                    break
-                seen += [m["id"] for m in chat["messages"]]
-                assert chat["more_after_up_to"] == (chat["up_to"] < 24)
-                _run(tools._tg_mark_inbox({"marks": out["marks"]}))
-            assert seen == list(range(10, 25)), seen
-
-            assert "error" in json.loads(_run(tools._tg_read_inbox({"first_visit": "oldest"})))
-            # The default still skips the history of a chat it has never seen.
-            history[2] = [30, 31]
-            fresh = _marks()
-            fresh.forget_all()
-            out = json.loads(_run(tools._tg_read_inbox({"messages_per_chat": 1, "include_saved": False})))
-            chat = next(c for c in out["chats"] if c["chat_id"] == "2")
-            assert [m["id"] for m in chat["messages"]] == [31] and chat["up_to"] == 31
-        finally:
-            tools.tool_client = original

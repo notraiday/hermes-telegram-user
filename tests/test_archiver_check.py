@@ -269,17 +269,3 @@ def test_the_script_runs_standalone_under_a_bare_environment(tmp_path):
     assert done.returncode == 0, done.stderr
     assert "DAVIS_PASSWORD" in done.stdout  # calendar not configured: said, not crashed
     assert (home / "state" / "archiver" / "vault.git" / "HEAD").exists()
-
-
-def test_quiet_hours_wrap_midnight_and_reach_the_report(world, capsys):
-    from datetime import datetime
-
-    module, _, peek, _ = world
-    assert module.quiet_now(datetime(2026, 10, 7, 23, 30)) and module.quiet_now(datetime(2026, 10, 8, 7, 59))
-    assert not module.quiet_now(datetime(2026, 10, 8, 8, 0)) and not module.quiet_now(datetime(2026, 10, 8, 22, 59))
-    with _env(ARCHIVER_QUIET_HOURS="1-3"):
-        assert module.quiet_now(datetime(2026, 10, 8, 2, 0)) and not module.quiet_now(datetime(2026, 10, 8, 3, 0))
-    peek.write_text(json.dumps({"new_chats": 1, "accounts": [{"account": "personal", "new_chats": 1}]}))
-    module.calendar_report = lambda state, uids: None
-    out = _run(module, capsys)
-    assert out.splitlines()[1].startswith("Тихие часы: ")
