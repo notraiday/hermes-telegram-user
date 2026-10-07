@@ -25,6 +25,7 @@ from .core.helpers import (
     find_topic_root,
     kind_has_media_payload,
     message_chat,
+    is_saved_messages_name,
     message_to_dict,
     media_filter,
     parse_dt,
@@ -213,11 +214,17 @@ async def _tg_find_chat(args: dict[str, Any], **_: Any) -> str:
     if not query:
         return _json({"error": "query is required"})
     limit = bounded_int(args.get("limit"), 20, 1, 100)
+    want_saved = is_saved_messages_name(query_raw)
     try:
         async with tool_client() as client:
             rows = []
             async for dialog in client.iter_dialogs():
                 summary = dialog_summary(dialog)
+                if want_saved:
+                    if summary["saved_messages"]:
+                        rows.append(summary)
+                        break
+                    continue
                 name = dialog.name or ""
                 username = getattr(dialog.entity, "username", None) or ""
                 aliases = summary.get("aliases", [])
@@ -1690,6 +1697,40 @@ async def _tg_read_collection(args: dict[str, Any], **_: Any) -> str:
         return _error(exc)
 
 
+# --- chat list ----------------------------------------------------------------
+
+
+async def _tg_list_chats(args: dict[str, Any], **_: Any) -> str:
+    kind = str(args.get("kind") or "all").strip().lower()
+    if kind not in {"all", "private", "groups", "channels", "bots"}:
+        return _json({"error": "kind must be one of: all, private, groups, channels, bots"})
+    limit = bounded_int(args.get("limit"), 100, 1, 1000)
+    include_archived = bool(args.get("include_archived", True))
+    try:
+        async with tool_client() as client:
+            rows = []
+            async for dialog in client.iter_dialogs(archived=None if include_archived else False):
+                entity = dialog.entity
+                is_bot = bool(getattr(entity, "bot", False))
+                if kind == "private" and not (dialog.is_user and not is_bot):
+                    continue
+                if kind == "bots" and not is_bot:
+                    continue
+                if kind == "groups" and not dialog.is_group:
+                    continue
+                if kind == "channels" and not (dialog.is_channel and not dialog.is_group):
+                    continue
+                row = dialog_summary(dialog)
+                row["bot"] = is_bot
+                row["last_message_at"] = utc_iso(getattr(dialog, "date", None))
+                rows.append(row)
+                if len(rows) >= limit:
+                    break
+            return _json({"count": len(rows), "chats": rows})
+    except Exception as exc:
+        return _error(exc)
+
+
 # --- accounts -------------------------------------------------------------------
 
 
@@ -2055,7 +2096,7 @@ def _obj(properties: dict[str, Any], required: Optional[list[str]] = None) -> di
 
 _CHAT = {
     "type": "string",
-    "description": "Chat id, title, username, or exact saved Telegram alias.",
+    "description": "Chat id, title, @username, or exact saved alias. 'me' (also 'saved', 'избранное') is this account's own Saved Messages; '@saved' is the public username.",
 }
 _COLLECTION = {
     "type": "string",
@@ -2461,6 +2502,18 @@ _TOOL_DEFS = [
                 "since_last_digest": {"type": "boolean"},
             },
             ["collection"],
+        ),
+    ),
+    (
+        "tg_list_chats",
+        "List the account's chats, most recent first: private chats, groups, channels or bots. Saved Messages is marked saved_messages=true. Read-only.",
+        _tg_list_chats,
+        _obj(
+            {
+                "kind": {"type": "string", "enum": ["all", "private", "groups", "channels", "bots"]},
+                "include_archived": {"type": "boolean"},
+                "limit": _LIMIT,
+            }
         ),
     ),
     (

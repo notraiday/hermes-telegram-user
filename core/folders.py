@@ -161,9 +161,12 @@ def folder_contains(folder: FolderView, dialog: Any) -> bool:
 def dialog_summary(dialog: Any) -> dict[str, Any]:
     raw = getattr(dialog, "dialog", None)
     aliases = aliases_for_peer(str(dialog.id))
+    saved = bool(getattr(dialog.entity, "is_self", False))
     return {
         "id": str(dialog.id),
-        "name": sanitize_name(dialog.name or entity_label(dialog.entity), limit=256),
+        "name": "Saved Messages (Избранное)" if saved else sanitize_name(
+            dialog.name or entity_label(dialog.entity), limit=256),
+        "saved_messages": saved,
         "aliases": aliases,
         "username": (
             sanitize_name(getattr(dialog.entity, "username", None), limit=128)

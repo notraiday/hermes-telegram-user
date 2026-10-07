@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _plugin_support import account_env, isolated_state, plugin_module  # noqa: E402
 
 EXPECTED_TOOLSET = "telegram_user"
-EXPECTED_TOOL_COUNT = 45
+EXPECTED_TOOL_COUNT = 46
 
 # handler name -> substring the structured error must contain
 GUARDED_HANDLERS = {
@@ -819,3 +819,22 @@ def test_inbox_reads_saved_private_and_collection_chats_and_marks_them():
             assert got == {"2": [12], "-50": [103]}, got
         finally:
             tools.tool_client = original
+
+
+def test_saved_messages_words_never_resolve_to_a_public_username():
+    from types import SimpleNamespace
+
+    helpers = plugin_module("core.helpers")
+    me = SimpleNamespace(id=1, is_self=True)
+
+    class Client:
+        async def get_me(self):
+            return me
+
+        async def get_entity(self, raw):
+            return SimpleNamespace(id=999, username=str(raw).lstrip("@"))
+
+    with account_env(mode="read"), isolated_state():
+        for word in ("saved", "Saved Messages", "избранное", "me", "self"):
+            assert _run(helpers.resolve_chat(Client(), word)) is me, word
+        assert _run(helpers.resolve_chat(Client(), "@saved")).id == 999

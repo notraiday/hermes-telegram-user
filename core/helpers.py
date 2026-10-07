@@ -292,10 +292,26 @@ async def _resolve_alias(client: Any, raw: str):
     raise ValueError(f"Telegram alias target is no longer available: {sanitize_name(raw, limit=128)}")
 
 
+# Bare words that always mean the account's own Saved Messages. Without this,
+# "saved" resolves to whatever public channel owns the username @saved. A
+# leading "@" keeps the old meaning: "@saved" is that username, on purpose.
+SAVED_MESSAGES_NAMES = {
+    "me", "self", "saved", "saved messages", "savedmessages", "favorites", "favourites",
+    "избранное", "сохранённые", "сохраненные", "сохранённые сообщения",
+    "сохраненные сообщения", "заметки",
+}
+
+
+def is_saved_messages_name(raw: str) -> bool:
+    return str(raw or "").strip().casefold() in SAVED_MESSAGES_NAMES
+
+
 async def resolve_chat(client: Any, chat: str, *, allow_alias: bool = True):
     raw = str(chat).strip()
     if not raw:
         raise ValueError("chat is required")
+    if is_saved_messages_name(raw):
+        return await client.get_me()
 
     if allow_alias:
         resolved_alias = await _resolve_alias(client, raw)
