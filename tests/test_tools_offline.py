@@ -838,3 +838,129 @@ def test_saved_messages_words_never_resolve_to_a_public_username():
         for word in ("saved", "Saved Messages", "избранное", "me", "self"):
             assert _run(helpers.resolve_chat(Client(), word)) is me, word
         assert _run(helpers.resolve_chat(Client(), "@saved")).id == 999
+
+
+def _peek_world():
+    """A fake account: Saved Messages, private chats, a bot, the service chat, groups."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from telethon.tl import types as tl
+
+    me = tl.User(id=1, is_self=True, first_name="me")
+    friend = tl.User(id=2, first_name="friend")
+    bot = tl.User(id=4, bot=True, first_name="bot")
+    service = tl.User(id=777000, first_name="Telegram")
+    group = tl.Chat(id=50, title="group", photo=tl.ChatPhotoEmpty(), participants_count=3,
+                    date=datetime.now(timezone.utc), version=1)
+    forum = tl.Chat(id=60, title="forum", photo=tl.ChatPhotoEmpty(), participants_count=3,
+                    date=datetime.now(timezone.utc), version=1)
+    history = {1: [1, 2], 2: [10, 11], 4: [30], 777000: [40], 50: [100], 60: [200]}
+    thread = {60: [201]}  # messages in forum thread 7
+    requests = []
+
+    class Client:
+        async def iter_dialogs(self):
+            for e in (me, friend, bot, service, group, forum):
+                top = history[e.id][-1] if history[e.id] else 0
+                yield SimpleNamespace(entity=e, dialog=SimpleNamespace(top_message=top))
+
+        async def iter_messages(self, entity, limit=None, min_id=0, reverse=False, reply_to=None, **kw):
+            requests.append((entity.id, reply_to))
+            pool = thread.get(entity.id, []) if reply_to is not None else history[entity.id]
+            ids = [i for i in pool if i > (min_id or 0)]
+            ids = ids if reverse else list(reversed(ids))
+            for i in ids[:limit]:
+                yield SimpleNamespace(id=i, date=datetime.now(timezone.utc), message=f"m{i}",
+                                      out=entity.id == 1, sender=None, sender_id=None,
+                                      reply_to=None, media=None, fwd_from=None, entities=None,
+                                      reply_markup=None, grouped_id=None)
+
+    @contextlib.asynccontextmanager
+    async def fake_client(*a, **k):
+        yield Client()
+
+    return history, thread, requests, fake_client
+
+
+def test_inbox_peek_sees_what_read_inbox_would_return_and_marks_nothing():
+    tools = _tools()
+    store = plugin_module("core.state.collections")
+    history, thread, requests, fake_client = _peek_world()
+
+    with account_env(mode="read"), isolated_state():
+        store.save_collection("watch", members=[{"peer_id": "-50", "thread": None},
+                                                {"peer_id": "-60", "thread": 7}])
+        original = tools.tool_client
+        tools.tool_client = fake_client
+        try:
+            peek = _run(tools.inbox_peek())
+            got = {(c["chat_id"], c["thread_id"]): c for c in peek["chats"]}
+            assert set(got) == {("1", None), ("2", None), ("-50", None), ("-60", "7")}, sorted(got)
+            assert all(c["first_visit"] for c in got.values())
+            assert peek["new_chats"] == 4 and peek["account"] == "acct"
+            # Whole chats are judged by the dialog's top message: no request per chat.
+            assert requests == [(60, 7)], requests
+
+            # Peeking marked nothing: the inbox still returns all of it.
+            first = json.loads(_run(tools._tg_read_inbox({})))
+            assert {(c["chat_id"], c["thread_id"]) for c in first["chats"]} == set(got)
+            assert not json.loads(_run(tools._tg_mark_inbox({"marks": first["marks"]})))["errors"]
+            assert _run(tools.inbox_peek())["new_chats"] == 0
+
+            history[2].append(12)
+            thread[60].append(202)
+            history[4].append(31)  # bots stay out, as in tg_read_inbox
+            peek = _run(tools.inbox_peek())
+            assert {(c["chat_id"], c["thread_id"]) for c in peek["chats"]} == {("2", None), ("-60", "7")}
+            assert not any(c["first_visit"] for c in peek["chats"])
+        finally:
+            tools.tool_client = original
+
+
+def test_inbox_command_prints_every_account_and_flags_failures(capsys, tmp_path):
+    import argparse
+
+    tools = _tools()
+    cli = plugin_module("cli")
+    _, _, _, fake_client = _peek_world()
+
+    with account_env(mode="read"), isolated_state():
+        original = tools.tool_client
+        tools.tool_client = fake_client
+        try:
+            args = argparse.Namespace(telegram_user_action="inbox", peek=True, account=None,
+                                      env=tmp_path / "missing.env")
+            assert cli.run_command(args) == 0
+            out = json.loads(capsys.readouterr().out)
+            assert out["new_chats"] == 2 and [a["account"] for a in out["accounts"]] == ["acct"]
+
+            args.account = ["acct", "nobody"]
+            assert cli.run_command(args) == 1
+            out = json.loads(capsys.readouterr().out)
+            assert out["accounts"][1]["account"] == "nobody" and "unknown" in out["accounts"][1]["error"]
+
+            args.peek = False
+            assert cli.run_command(args) == 2
+        finally:
+            tools.tool_client = original
+
+
+def test_inbox_command_takes_plugin_variables_from_the_env_file(tmp_path):
+    cli = plugin_module("cli")
+    env = tmp_path / ".env"
+    env.write_text("HERMES_TG_USER_PEEKTEST_X='from file'\nOTHER_SECRET=nope\n"
+                   "export HERMES_TG_USER_PEEKTEST_Y=set\n", encoding="utf-8")
+    keys = ("HERMES_TG_USER_PEEKTEST_X", "HERMES_TG_USER_PEEKTEST_Y", "OTHER_SECRET")
+    saved = {k: os.environ.pop(k, None) for k in keys}
+    os.environ["HERMES_TG_USER_PEEKTEST_Y"] = "already"
+    try:
+        cli._load_account_env(env)
+        assert os.environ["HERMES_TG_USER_PEEKTEST_X"] == "from file"
+        assert os.environ["HERMES_TG_USER_PEEKTEST_Y"] == "already"
+        assert "OTHER_SECRET" not in os.environ
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v

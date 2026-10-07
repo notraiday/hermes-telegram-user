@@ -1776,58 +1776,72 @@ async def _inbox_scope_messages(client, entity, *, mark: int, top: int, per_chat
     return rows, up_to, more, first
 
 
+def _inbox_member_threads(args: dict[str, Any]) -> dict[str, list[tuple[Optional[int], str]]]:
+    """peer id -> [(thread, collection name)] for the collections the inbox covers."""
+    wanted = args.get("collections")
+    if wanted is None:
+        names = [row["name"] for row in list_collections()]
+    else:
+        names = [str(n) for n in (wanted if isinstance(wanted, list) else [wanted]) if str(n).strip()]
+    member_threads: dict[str, list[tuple[Optional[int], str]]] = {}
+    for name in names:
+        collection = get_collection(name)
+        if collection is None:
+            raise ValueError(f"unknown collection: {sanitize_name(name, limit=128)}")
+        for row in _selectable_members(collection):
+            thread = row.get("thread")
+            member_threads.setdefault(row["peer_id"], []).append(
+                (int(thread) if thread is not None else None, collection["name"]))
+    return member_threads
+
+
+async def _inbox_scopes(client, args: dict[str, Any], member_threads) -> dict[tuple[str, Optional[str]], dict[str, Any]]:
+    """Every (chat, thread) the inbox covers, with the dialog's top message id."""
+    include_saved = bool(args.get("include_saved", True))
+    include_private = bool(args.get("include_private", True))
+    include_bots = bool(args.get("include_bots", False))
+    include_service = bool(args.get("include_service", False))
+    scopes: dict[tuple[str, Optional[str]], dict[str, Any]] = {}
+    async for dialog in client.iter_dialogs():
+        entity = dialog.entity
+        key = peer_id(entity)
+        if not key:
+            continue
+        raw = getattr(dialog, "dialog", None)
+        top = int(getattr(raw, "top_message", 0) or 0)
+        kind = _inbox_kind(entity)
+        wanted_here: list[tuple[Optional[int], str]] = []
+        if kind == "saved" and include_saved:
+            wanted_here.append((None, "saved"))
+        elif kind == "private" and include_private and (include_service or key not in _SERVICE_PEERS):
+            wanted_here.append((None, "private"))
+        elif kind == "bot" and include_bots:
+            wanted_here.append((None, "bot"))
+        for thread, cname in member_threads.get(key, []):
+            wanted_here.append((thread, f"collection:{cname}"))
+        for thread, source in wanted_here:
+            tkey = str(thread) if thread is not None else None
+            entry = scopes.get((key, tkey))
+            if entry:
+                entry["sources"].append(source)
+                continue
+            scopes[(key, tkey)] = {"dialog": dialog, "thread": thread, "top": top,
+                                   "sources": [source]}
+    return scopes
+
+
 async def _tg_read_inbox(args: dict[str, Any], **_: Any) -> str:
     """New messages from Saved Messages, private chats and collection chats."""
     try:
         per_chat = bounded_int(args.get("messages_per_chat"), 50, 1, 300)
         max_chats = bounded_int(args.get("max_chats"), 50, 1, 300)
-        include_saved = bool(args.get("include_saved", True))
-        include_private = bool(args.get("include_private", True))
-        include_bots = bool(args.get("include_bots", False))
-        include_service = bool(args.get("include_service", False))
-        wanted = args.get("collections")
-        if wanted is None:
-            names = [row["name"] for row in list_collections()]
-        else:
-            names = [str(n) for n in (wanted if isinstance(wanted, list) else [wanted]) if str(n).strip()]
-
-        scopes: dict[tuple[str, Optional[str]], dict[str, Any]] = {}
-        member_threads: dict[str, list[tuple[Optional[int], str]]] = {}
-        for name in names:
-            collection = get_collection(name)
-            if collection is None:
-                return _json({"error": f"unknown collection: {sanitize_name(name, limit=128)}"})
-            for row in _selectable_members(collection):
-                thread = row.get("thread")
-                member_threads.setdefault(row["peer_id"], []).append(
-                    (int(thread) if thread is not None else None, collection["name"]))
+        try:
+            member_threads = _inbox_member_threads(args)
+        except ValueError as exc:
+            return _json({"error": str(exc)})
 
         async with tool_client() as client:
-            async for dialog in client.iter_dialogs():
-                entity = dialog.entity
-                key = peer_id(entity)
-                if not key:
-                    continue
-                raw = getattr(dialog, "dialog", None)
-                top = int(getattr(raw, "top_message", 0) or 0)
-                kind = _inbox_kind(entity)
-                wanted_here: list[tuple[Optional[int], str]] = []
-                if kind == "saved" and include_saved:
-                    wanted_here.append((None, "saved"))
-                elif kind == "private" and include_private and (include_service or key not in _SERVICE_PEERS):
-                    wanted_here.append((None, "private"))
-                elif kind == "bot" and include_bots:
-                    wanted_here.append((None, "bot"))
-                for thread, cname in member_threads.get(key, []):
-                    wanted_here.append((thread, f"collection:{cname}"))
-                for thread, source in wanted_here:
-                    tkey = str(thread) if thread is not None else None
-                    entry = scopes.get((key, tkey))
-                    if entry:
-                        entry["sources"].append(source)
-                        continue
-                    scopes[(key, tkey)] = {"dialog": dialog, "thread": thread, "top": top,
-                                           "sources": [source]}
+            scopes = await _inbox_scopes(client, args, member_threads)
 
             chats = []
             skipped = 0
@@ -1872,6 +1886,35 @@ async def _tg_read_inbox(args: dict[str, Any], **_: Any) -> str:
             })
     except Exception as exc:
         return _error(exc)
+
+
+async def inbox_peek() -> dict[str, Any]:
+    """Which inbox chats have something tg_read_inbox would return, without reading it.
+
+    For the archiver's pre-run check (`hermes telegram-user inbox --peek`): it must
+    decide whether to wake the model at all, so it needs a yes/no per chat, not the
+    messages. Whole chats are judged by the dialog's top message against the mark,
+    which costs no request per chat; only collection threads need one message each.
+    Same scopes and marks as tg_read_inbox with its defaults; nothing is marked.
+    """
+    member_threads = _inbox_member_threads({})
+    async with tool_client() as client:
+        scopes = await _inbox_scopes(client, {}, member_threads)
+        chats = []
+        for (key, tkey), scope in scopes.items():
+            mark = int((get_mark(key, tkey) or {}).get("contiguous") or 0)
+            if scope["thread"] is None:
+                if not scope["top"] or mark >= scope["top"]:
+                    continue
+            else:
+                kwargs: dict[str, Any] = {"reply_to": int(scope["thread"])}
+                if mark:
+                    kwargs["min_id"] = mark
+                if not [m async for m in client.iter_messages(scope["dialog"].entity, limit=1, **kwargs)]:
+                    continue
+            chats.append({"chat_id": key, "thread_id": tkey, "sources": scope["sources"],
+                          "first_visit": not mark})
+    return {"account": current_account() or default_account(), "new_chats": len(chats), "chats": chats}
 
 
 async def _tg_mark_inbox(args: dict[str, Any], **_: Any) -> str:

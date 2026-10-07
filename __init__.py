@@ -20,13 +20,13 @@ def register(ctx: Any) -> None:
     # CLI, because Telegram delivers the code to the account owner's app.
     register_cli_command = getattr(ctx, "register_cli_command", None)
     if callable(register_cli_command):
-        from .cli import login_command, register_cli
+        from .cli import register_cli, run_command
 
         register_cli_command(
             name="telegram-user",
-            help="Telegram user accounts: log in and store sessions",
+            help="Telegram user accounts: log in, check the inbox",
             setup_fn=register_cli,
-            handler_fn=login_command,
+            handler_fn=run_command,
             description=(
                 "Log in to a Telegram account the plugin works with. "
                 "Run `hermes telegram-user login --account <name>`, then restart Hermes."
