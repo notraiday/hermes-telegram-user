@@ -78,7 +78,7 @@ def test_tool_surface_matches_manifest():
     """plugin.yaml is the published contract; tools.py must register exactly that set."""
     manifest = (ROOT / "plugin.yaml").read_text(encoding="utf-8")
     source = (ROOT / "tools.py").read_text(encoding="utf-8")
-    assert 'version: "0.12.0+rai.8"' in manifest
+    assert 'version: "0.12.0+rai.9"' in manifest
     published = [
         line.strip()[2:] for line in manifest.splitlines() if line.strip().startswith("- tg_")
     ]

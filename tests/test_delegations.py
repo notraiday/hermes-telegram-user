@@ -158,10 +158,19 @@ def test_an_expired_delegation_is_closed_and_reported():
         assert _run(tools.delegations_peek())["expired"] == []  # reported once
 
 
-def test_read_only_accounts_cannot_delegate_and_delegating_again_changes_terms():
-    with _setup(mode="read") as (tools, _):
-        out = _run(tools._tg_delegate_dialog({"chat": "@manager", "goal": "x"}))
-        assert "read-only" in out
+def test_a_read_only_account_writes_only_where_a_delegation_allows():
+    with _setup(mode="read") as (tools, world):
+        warning = tools.delegation_approval(tool_name="tg_delegate_dialog",
+                                            args={"chat": "@manager", "goal": "x"})["message"]
+        assert "только для чтения" in warning
+        row = _delegate(tools)
+        sent = json.loads(_run(tools._tg_dialog_message({"delegation": row["id"], "text": "Здравствуйте"})))
+        assert sent["sent"] and world.sent == [(7000000001, "Здравствуйте")]
+        refused = _run(tools._tg_send_message({"chat": "@manager", "text": "мимо поручения"}))
+        assert "read-only" in refused and len(world.sent) == 1
+
+
+def test_delegating_again_changes_terms():
     with _setup() as (tools, _):
         first = _delegate(tools)
         again = _delegate(tools, limits="18:00–21:00")

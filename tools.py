@@ -2345,6 +2345,11 @@ def delegation_approval(*args: Any, **kwargs: Any) -> Optional[dict[str, Any]]:
         lines = [
             f"Поручить агенту вести переписку с {sanitize_name(call.get('chat'), limit=128)} "
             f"от аккаунта {sanitize_name(account, limit=32)} на {hours} ч, без подтверждения каждого сообщения.",
+        ]
+        if not get_account(account or None).writable:
+            lines.append(f"⚠ {sanitize_name(account, limit=32)} — аккаунт только для чтения: писать с него "
+                         "агент будет только в этот чат и только по этому поручению.")
+        lines += [
             f"Цель: {sanitize_text(call.get('goal'), limit=500)}",
             f"Рамки: {sanitize_text(call.get('limits'), limit=500) or 'не заданы'}",
             f"О тебе можно сообщать: {sanitize_text(call.get('share'), limit=300) or 'только имя'}",
@@ -2383,8 +2388,9 @@ def _active_delegation(args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _tg_delegate_dialog(args: dict[str, Any], **_: Any) -> str:
+    # No require_write: the owner's approval of this one delegation is what lets
+    # the agent write here, also from an account that is otherwise read-only.
     try:
-        require_write()
         chat = str(args.get("chat") or "").strip()
         goal = str(args.get("goal") or "").strip()
         if not chat or not goal:
@@ -2444,8 +2450,9 @@ async def _tg_dialog_read(args: dict[str, Any], **_: Any) -> str:
 
 
 async def _tg_dialog_message(args: dict[str, Any], **_: Any) -> str:
+    # The active delegation is the permission, on read-only accounts too; every
+    # other write tool still refuses there (require_write).
     try:
-        require_write()
         row = _active_delegation(args)
         text = str(args.get("text") or "")
         if not text.strip():
@@ -3089,7 +3096,7 @@ _TOOL_DEFS = [
     ),
     (
         "tg_delegate_dialog",
-        "Let the agent carry a conversation in one chat on its own, for one goal, until a deadline. The owner approves this once (they are asked automatically); after that tg_dialog_message writes there without asking, and a background job answers replies. Calling it again for the same chat changes the terms (asks again). Write accounts only.",
+        "Let the agent carry a conversation in one chat on its own, for one goal, until a deadline. The owner approves this once (they are asked automatically); after that tg_dialog_message writes there without asking, and a background job answers replies. Calling it again for the same chat changes the terms (asks again). Works on read-only accounts too: the approval is the permission, for this chat only.",
         _tg_delegate_dialog,
         _obj(
             {
@@ -3116,7 +3123,7 @@ _TOOL_DEFS = [
     ),
     (
         "tg_dialog_message",
-        "Write in a delegated dialog without asking the owner: only to that chat, only while the delegation is active. Write accounts only.",
+        "Write in a delegated dialog without asking the owner: only to that chat, only while the delegation is active, from the account the delegation was made on (read-only ones included).",
         _tg_dialog_message,
         _obj({"delegation": {"type": "string"}, "text": {"type": "string"},
               "reply_to": {"type": "integer", "description": "Message id to reply to."}},
