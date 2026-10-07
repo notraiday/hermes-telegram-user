@@ -1,3 +1,27 @@
+# Hermes Telegram User — fork (rai)
+
+Fork of [AIast0r/hermes-telegram-user](https://github.com/AIast0r/hermes-telegram-user) at `d8b217c`. Differences from upstream:
+
+- **No `.h` platform.** The plugin registers tools and the login command only. Talk to Hermes in Telegram through the regular bot-token platform.
+- **Several accounts**, each with its own session, **mode** (`read` or `write`) and **proxy** (`socks5://`, `socks4://`, `http://`, `mtproxy://secret@host:port`). Every tool takes an optional `account` argument; the first configured account is the default. State (archive, digest marks, collections, aliases, transcripts) is kept separately per account under `plugin-data/telegram-user/accounts/<name>/`.
+- **Write tools** on `write` accounts: `tg_send_message` (text, replies, forum topics), `tg_send_file` (only from directories in `HERMES_TG_USER_SEND_FILE_ROOTS`), `tg_forward_messages`, `tg_send_reaction`, `tg_edit_message`, `tg_delete_messages`, `tg_pin_message`, `tg_mark_read`. On `read` accounts they refuse before connecting. `tg_mark_summarized` clears the unread badge only on `write` accounts and only with `acknowledge=true`; by default it moves the local mark only.
+- **Inbox for scheduled jobs:** `tg_read_inbox` returns everything new since the last processed position from Saved Messages, every private chat (contacts and not; bots and Telegram's service chat 777000 off by default) and the chats of saved collections — oldest first, including the owner's own messages. `tg_mark_inbox` advances the local marks afterwards. A chat seen for the first time contributes only its latest messages.
+- **Phone numbers are returned** by `tg_contacts`, `tg_participants` and `tg_get_profile`.
+- `tg_accounts` lists configured accounts (mode, proxy without credentials, login state).
+
+## Setup
+
+```bash
+# API id/hash from my.telegram.org go into ~/.hermes/.env as
+# HERMES_TG_USER_API_ID / HERMES_TG_USER_API_HASH (the installer asks for them).
+hermes telegram-user login --account personal --mode read  [--proxy socks5://host:port]
+hermes telegram-user login --account agent    --mode write [--proxy socks5://host:port]
+```
+
+Each login writes `HERMES_TG_USER_<NAME>_SESSION`, `_MODE`, `_PROXY` and adds the account to `HERMES_TG_USER_ACCOUNTS` in the Hermes `.env`. Restart Hermes afterwards.
+
+---
+
 # Hermes Telegram User (MTProto)
 
 A **self-contained Hermes platform plugin** for controlling Hermes from your own Telegram user account over MTProto/Telethon.

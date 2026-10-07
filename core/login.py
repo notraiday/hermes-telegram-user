@@ -110,11 +110,13 @@ def write_env_value(path: Path, key: str, value: str) -> bool:
     return True
 
 
-async def _login(api_id: int, api_hash: str) -> str:
+async def _login(api_id: int, api_hash: str, proxy: Optional[str] = None) -> str:
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
-    client = TelegramClient(StringSession(), api_id, api_hash)
+    from .accounts import telethon_proxy_kwargs
+
+    client = TelegramClient(StringSession(), api_id, api_hash, **telethon_proxy_kwargs(proxy))
     # Telethon's own interactive flow: phone, then the code Telegram sends, then
     # the 2FA password when the account has one.
     await client.start()
@@ -124,9 +126,23 @@ async def _login(api_id: int, api_hash: str) -> str:
         await client.disconnect()
 
 
-def run_login(env_path: Optional[Path] = None, *, print_only: bool = False) -> int:
-    """Log in, then store the session. Returns a process exit code."""
+def run_login(
+    env_path: Optional[Path] = None,
+    *,
+    print_only: bool = False,
+    account: str = "default",
+    mode: Optional[str] = None,
+    proxy: Optional[str] = None,
+) -> int:
+    """Log in one account, then store its session (and mode/proxy). Returns an exit code."""
     import asyncio
+
+    from .accounts import ACCOUNTS_KEY, env_key
+
+    account = (account or "default").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", account):
+        print("account name: letters, digits, _ and -, up to 32 characters", file=sys.stderr)
+        return 2
 
     target = env_path or hermes_env_path()
     try:
@@ -134,8 +150,11 @@ def run_login(env_path: Optional[Path] = None, *, print_only: bool = False) -> i
     except OSError:
         body = ""
 
-    api_id_raw = (os.environ.get(API_ID_KEY) or "").strip() or read_env_value(body, API_ID_KEY)
-    api_hash = (os.environ.get(API_HASH_KEY) or "").strip() or read_env_value(body, API_HASH_KEY)
+    def value(key: str) -> str:
+        return (os.environ.get(key) or "").strip() or read_env_value(body, key)
+
+    api_id_raw = value(env_key(account, "API_ID")) or value(API_ID_KEY)
+    api_hash = value(env_key(account, "API_HASH")) or value(API_HASH_KEY)
     if not api_id_raw or not api_hash:
         print(
             f"Need {API_ID_KEY} and {API_HASH_KEY}: neither the environment nor {target} has them.\n"
@@ -149,12 +168,13 @@ def run_login(env_path: Optional[Path] = None, *, print_only: bool = False) -> i
         print(f"{API_ID_KEY} must be an integer", file=sys.stderr)
         return 2
 
+    proxy = (proxy or value(env_key(account, "PROXY")) or "").strip() or None
     try:
-        session = asyncio.run(_login(api_id, api_hash))
-    except ModuleNotFoundError:
+        session = asyncio.run(_login(api_id, api_hash, proxy))
+    except ModuleNotFoundError as exc:
         print(
-            "telethon is not installed for this Python.\n"
-            "Install it into the interpreter Hermes runs: pip install 'telethon>=1.44,<2'",
+            f"Missing Python package ({exc.name}).\n"
+            "Install into the interpreter Hermes runs: pip install 'telethon>=1.44,<2' 'python-socks[asyncio]'",
             file=sys.stderr,
         )
         return 2
@@ -162,16 +182,30 @@ def run_login(env_path: Optional[Path] = None, *, print_only: bool = False) -> i
         print("\nCancelled; nothing was written.", file=sys.stderr)
         return 1
 
+    session_key = env_key(account, "SESSION")
     if print_only:
-        print(f"\n{SESSION_KEY}=")
+        print(f"\n{session_key}=")
         print(session)
         return 0
 
-    if not write_env_value(target, SESSION_KEY, session):
-        print("\nStoring it failed. The session is below — put it in the .env yourself:\n")
-        print(f"{SESSION_KEY}={session}")
-        return 1
+    names = [n.strip().lower() for n in value(ACCOUNTS_KEY).split(",") if n.strip()]
+    if account not in names:
+        names.append(account)
+    writes = [(session_key, session), (ACCOUNTS_KEY, ",".join(names))]
+    if mode:
+        writes.append((env_key(account, "MODE"), mode))
+    elif not value(env_key(account, "MODE")):
+        writes.append((env_key(account, "MODE"), "read"))
+    if proxy:
+        writes.append((env_key(account, "PROXY"), proxy))
 
-    print(f"\nSaved {SESSION_KEY} to {target} (other lines untouched).")
-    print("Now restart the gateway:  hermes gateway restart")
+    for key, val in writes:
+        if not write_env_value(target, key, val):
+            print("\nStoring it failed. Put these lines in the .env yourself:\n")
+            for k, v in writes:
+                print(f"{k}={v}")
+            return 1
+
+    print(f"\nSaved account {account!r} to {target} (other lines untouched).")
+    print("Now restart Hermes (gateway and the backend Desktop connects to).")
     return 0

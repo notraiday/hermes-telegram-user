@@ -33,23 +33,44 @@ def _legacy_home() -> Path:
     return Path.home() / ".hermes" / "state" / PLUGIN_NAME
 
 
+def _base_dir() -> Path:
+    raw = (os.getenv("HERMES_TG_USER_STATE_DIR") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return _plugin_home() or _legacy_home()
+
+
+def _account_name() -> str | None:
+    """The account the current tool call works on (see core.accounts)."""
+    try:
+        from ..accounts import current_account, default_account
+
+        return current_account() or default_account()
+    except Exception:
+        return None
+
+
 def state_dir() -> Path:
     """Private persistent state owned by this plugin (aliases/transcripts/archive).
+
+    Every configured account gets its own subtree ``accounts/<name>/``: chat ids,
+    digest marks, collections and archives belong to one Telegram account and
+    must never leak into another one's view.
 
     Resolution order: the explicit ``HERMES_TG_USER_STATE_DIR`` override, then
     Hermes' per-plugin data root, then the pre-convention path. The override is
     first so it remains the escape hatch it is documented to be.
     """
-    raw = (os.getenv("HERMES_TG_USER_STATE_DIR") or "").strip()
-    if raw:
-        path = Path(raw).expanduser()
-    else:
-        path = _plugin_home() or _legacy_home()
+    path = _base_dir()
+    account = _account_name()
+    if account:
+        path = path / "accounts" / account
     path.mkdir(parents=True, exist_ok=True)
-    try:
-        path.chmod(0o700)
-    except OSError:
-        pass
+    for part in (path, path.parent, path.parent.parent) if account else (path,):
+        try:
+            part.chmod(0o700)
+        except OSError:
+            pass
     return path
 
 

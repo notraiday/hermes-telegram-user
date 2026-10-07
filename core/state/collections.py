@@ -316,8 +316,21 @@ def _public(key: str, row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_CACHE_PATH: Optional[str] = None
+
+
+def _follow_account() -> None:
+    """Drop the in-memory copy when the active account (and so the file) changed."""
+    global _CACHE, _CACHE_PATH
+    current = str(collections_path())
+    if _CACHE_PATH != current:
+        _CACHE = None
+        _CACHE_PATH = current
+
+
 def _load_unlocked() -> dict[str, dict[str, Any]]:
     """Collections as currently known; a missing or corrupt file means none."""
+    _follow_account()
     global _CACHE
     if _CACHE is not None:
         return _CACHE
@@ -342,6 +355,7 @@ def _load_unlocked() -> dict[str, dict[str, Any]]:
 
 
 def _save_unlocked(collections: dict[str, dict[str, Any]]) -> None:
+    _follow_account()
     global _CACHE
     path = collections_path()
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")

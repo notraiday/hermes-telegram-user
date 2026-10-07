@@ -24,8 +24,9 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
         help="Log in to Telegram once and store the session in the Hermes .env",
         description=(
             "Prompts for the phone number, the login code Telegram sends you, and the 2FA "
-            "password if the account has one, then writes HERMES_TG_USER_SESSION into the "
-            "Hermes .env. Restart the gateway afterwards."
+            "password if the account has one, then writes HERMES_TG_USER_<ACCOUNT>_SESSION "
+            "(and the account's mode/proxy if given) into the Hermes .env and adds the "
+            "account to HERMES_TG_USER_ACCOUNTS. Restart Hermes afterwards."
         ),
     )
     login.add_argument(
@@ -33,6 +34,22 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
         type=Path,
         default=None,
         help="dotenv file to read the API id/hash from and write the session to",
+    )
+    login.add_argument(
+        "--account",
+        default="default",
+        help="account name, e.g. personal or agent (letters, digits, _ and -)",
+    )
+    login.add_argument(
+        "--mode",
+        choices=["read", "write"],
+        default=None,
+        help="read (default for new accounts) or write",
+    )
+    login.add_argument(
+        "--proxy",
+        default=None,
+        help="proxy for this account: socks5://host:port, http://host:port or mtproxy://secret@host:port",
     )
     login.add_argument(
         "--print-only",
@@ -49,4 +66,7 @@ def login_command(args: argparse.Namespace) -> int:
     return run_login(
         getattr(args, "env", None),
         print_only=bool(getattr(args, "print_only", False)),
+        account=str(getattr(args, "account", None) or "default"),
+        mode=getattr(args, "mode", None),
+        proxy=getattr(args, "proxy", None),
     )

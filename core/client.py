@@ -1,59 +1,38 @@
 from __future__ import annotations
 
-import asyncio
-import os
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional
 
-from .limits import (
-    acquire_gateway_session_lock,
-    configured_flood_sleep_threshold,
-    release_gateway_session_lock,
-    telegram_error_message,
-    tool_gate,
-)
+from .accounts import get_account, telethon_proxy_kwargs
+from .limits import configured_flood_sleep_threshold, telegram_error_message, tool_gate
 from .sanitize import sanitize_name
 
-# The gateway adapter owns this long-lived client. Tool calls intentionally do NOT
-# reuse it: current Hermes may execute async tool handlers on a fresh worker event
-# loop, and Telethon clients must stay on the event loop they were connected on.
-_client = None
-_client_lock = asyncio.Lock()
+# Every tool call opens its own short-lived client on its own event loop: current
+# Hermes may run async tool handlers on a fresh worker loop, and Telethon clients
+# must stay on the loop they were connected on. Which account (session, proxy)
+# the client belongs to comes from core.accounts' context variable.
 
 
-def _env(name: str, default: str = "") -> str:
-    return (os.getenv(name) or default).strip()
+def credentials(account: Optional[str] = None) -> tuple[int, str, str]:
+    acc = get_account(account)
+    return acc.api_id, acc.api_hash, acc.session
 
 
-def credentials() -> tuple[int, str, str]:
-    api_id_raw = _env("HERMES_TG_USER_API_ID")
-    api_hash = _env("HERMES_TG_USER_API_HASH")
-    session = _env("HERMES_TG_USER_SESSION")
-    if not (api_id_raw and api_hash and session):
-        raise RuntimeError(
-            "Missing HERMES_TG_USER_API_ID / HERMES_TG_USER_API_HASH / HERMES_TG_USER_SESSION"
-        )
-    try:
-        api_id = int(api_id_raw)
-    except ValueError as exc:
-        raise RuntimeError("HERMES_TG_USER_API_ID must be an integer") from exc
-    return api_id, api_hash, session
-
-
-def _new_client():
+def _new_client(account: Optional[str] = None):
     try:
         from telethon import TelegramClient
         from telethon.sessions import StringSession
     except ImportError as exc:
         raise RuntimeError("Telethon is not installed: pip install telethon") from exc
 
-    api_id, api_hash, session = credentials()
+    acc = get_account(account)
     return TelegramClient(
-        StringSession(session),
-        api_id,
-        api_hash,
+        StringSession(acc.session),
+        acc.api_id,
+        acc.api_hash,
         flood_sleep_threshold=configured_flood_sleep_threshold(),
+        **telethon_proxy_kwargs(acc.proxy),
     )
 
 
@@ -65,26 +44,8 @@ async def _connect_authorized(client):
     return client
 
 
-async def get_client():
-    """Return the long-lived gateway client bound to the gateway event loop."""
-    global _client
-    if _client is not None and _client.is_connected():
-        return _client
-    async with _client_lock:
-        if _client is not None and _client.is_connected():
-            return _client
-        _, _, session = credentials()
-        acquire_gateway_session_lock(session)
-        try:
-            _client = await _connect_authorized(_new_client())
-            return _client
-        except Exception:
-            release_gateway_session_lock()
-            raise
-
-
 @asynccontextmanager
-async def tool_client() -> AsyncIterator[Any]:
+async def tool_client(account: Optional[str] = None) -> AsyncIterator[Any]:
     """Create one paced, loop-local Telethon client for a Hermes tool call.
 
     The gate bounds concurrent connections and honors any process-wide FloodWait
@@ -92,7 +53,7 @@ async def tool_client() -> AsyncIterator[Any]:
     before Hermes tears down the worker event loop.
     """
     async with tool_gate():
-        client = _new_client()
+        client = _new_client(account)
         try:
             await _connect_authorized(client)
             yield client
@@ -104,18 +65,6 @@ async def tool_client() -> AsyncIterator[Any]:
         finally:
             with suppress(Exception):
                 await client.disconnect()
-
-
-async def disconnect_client() -> None:
-    global _client
-    if _client is not None:
-        try:
-            await _client.disconnect()
-        finally:
-            _client = None
-            release_gateway_session_lock()
-    else:
-        release_gateway_session_lock()
 
 
 def utc_iso(value: Optional[datetime]) -> Optional[str]:

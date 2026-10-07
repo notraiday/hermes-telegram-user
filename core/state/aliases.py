@@ -22,7 +22,20 @@ def _key(alias: str) -> str:
     return unicodedata.normalize("NFKC", str(alias or "")).strip().casefold()
 
 
+_CACHE_PATH: Optional[str] = None
+
+
+def _follow_account() -> None:
+    """Drop the in-memory copy when the active account (and so the file) changed."""
+    global _CACHE, _CACHE_PATH
+    current = str(_path())
+    if _CACHE_PATH != current:
+        _CACHE = None
+        _CACHE_PATH = current
+
+
 def _load_unlocked() -> dict[str, dict[str, Any]]:
+    _follow_account()
     global _CACHE
     if _CACHE is not None:
         return _CACHE
@@ -41,6 +54,7 @@ def _load_unlocked() -> dict[str, dict[str, Any]]:
 
 
 def _save_unlocked(aliases: dict[str, dict[str, Any]]) -> None:
+    _follow_account()
     global _CACHE
     path = _path()
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")

@@ -23,4 +23,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.login import run_login  # noqa: E402  (after the path fix above)
 
 if __name__ == "__main__":
-    raise SystemExit(run_login())
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Log in one Telegram account")
+    parser.add_argument("--account", default="default")
+    parser.add_argument("--mode", choices=["read", "write"], default=None)
+    parser.add_argument("--proxy", default=None)
+    parser.add_argument("--env", type=Path, default=None)
+    parser.add_argument("--print-only", action="store_true")
+    a = parser.parse_args()
+    raise SystemExit(
+        run_login(a.env, print_only=a.print_only, account=a.account, mode=a.mode, proxy=a.proxy)
+    )

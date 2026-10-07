@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _plugin_support import isolated_state, plugin_package  # noqa: E402
 
-EXPECTED_TOOL_COUNT = 34
+EXPECTED_TOOL_COUNT = 45
 
 STUBBED = (
     "gateway",
@@ -108,39 +108,16 @@ def test_the_package_exposes_the_register_entry_point():
         assert callable(getattr(package, "register", None))
 
 
-def test_the_entry_point_registers_every_tool_and_the_platform():
+def test_the_entry_point_registers_every_tool_and_no_platform():
     with isolated_state(), _gateway_stubs():
         ctx = _Ctx()
         plugin_package().register(ctx)
 
         names = [entry["name"] for entry in ctx.tools]
         assert len(names) == EXPECTED_TOOL_COUNT, names
-        assert len(set(names)) == EXPECTED_TOOL_COUNT, (
-            "a tool registered twice: the deferred platform path and register() both ran"
-        )
+        assert len(set(names)) == EXPECTED_TOOL_COUNT, "a tool registered twice"
         assert {entry["toolset"] for entry in ctx.tools} == {"telegram_user"}
-
-        assert len(ctx.platforms) == 1, "exactly one platform registration"
-        assert ctx.platforms[0]["name"] == "telegram_user"
-        assert ctx.platforms[0]["max_message_length"] == 4096
-
-
-def test_the_platform_inherits_the_telegram_allowlist():
-    """A plugin platform that declares no allowlist env default-denies.
-
-    ``_principal_authorized`` finds no env list to match, falls through to
-    ``GATEWAY_ALLOW_ALL_USERS`` and drops the owner's own ``.h`` as
-    "Unauthorized user" while the bot answers from that same account — which is
-    exactly what happened in production. Sharing the telegram env names is what
-    makes both surfaces admit the same people.
-    """
-    with isolated_state(), _gateway_stubs():
-        ctx = _Ctx()
-        plugin_package().register(ctx)
-
-        platform = ctx.platforms[0]
-        assert platform["allowed_users_env"] == "TELEGRAM_ALLOWED_USERS"
-        assert platform["allow_all_env"] == "TELEGRAM_ALLOW_ALL_USERS"
+        assert ctx.platforms == [], "the .h chat platform was removed; no platform may register"
 
 
 def test_every_published_tool_is_reachable_through_the_entry_point():

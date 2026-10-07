@@ -12,16 +12,17 @@ import asyncio
 import contextlib
 import inspect
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _plugin_support import isolated_state, plugin_module  # noqa: E402
+from _plugin_support import account_env, isolated_state, plugin_module  # noqa: E402
 
 EXPECTED_TOOLSET = "telegram_user"
-EXPECTED_TOOL_COUNT = 34
+EXPECTED_TOOL_COUNT = 45
 
 # handler name -> substring the structured error must contain
 GUARDED_HANDLERS = {
@@ -208,9 +209,9 @@ def _faked_marking(tools, *, fail_ack=False, topic_id=42):
 def test_marking_moves_the_badge_and_the_mark_together():
     tools = _tools()
     marks = _marks()
-    with isolated_state():
+    with account_env(), isolated_state():
         with _faked_marking(tools) as seen:
-            payload = json.loads(_run(tools._tg_mark_summarized({"chat": "c", "up_to": 50})))
+            payload = json.loads(_run(tools._tg_mark_summarized({"chat": "c", "up_to": 50, "acknowledge": True})))
 
         assert payload["up_to"] == 50
         assert payload["mark"] == 50
@@ -229,11 +230,11 @@ def test_a_failed_acknowledgement_moves_nothing():
     """
     tools = _tools()
     marks = _marks()
-    with isolated_state():
+    with account_env(), isolated_state():
         marks.set_mark(PEER, contiguous=10)
 
         with _faked_marking(tools, fail_ack=True):
-            payload = json.loads(_run(tools._tg_mark_summarized({"chat": "c", "up_to": 50})))
+            payload = json.loads(_run(tools._tg_mark_summarized({"chat": "c", "up_to": 50, "acknowledge": True})))
 
         assert "error" in payload
         assert marks.get_mark(PEER)["contiguous"] == 10, (
@@ -270,10 +271,10 @@ def test_marking_without_a_position_refuses_to_guess():
 def test_marking_without_a_position_uses_the_recorded_one():
     tools = _tools()
     marks = _marks()
-    with isolated_state():
+    with account_env(), isolated_state():
         marks.set_mark(PEER, contiguous=77)
         with _faked_marking(tools) as seen:
-            payload = json.loads(_run(tools._tg_mark_summarized({"chat": "c"})))
+            payload = json.loads(_run(tools._tg_mark_summarized({"chat": "c", "acknowledge": True})))
         assert payload["up_to"] == 77
         assert seen["acks"] == [{"topic_id": None, "up_to": 77}]
 
@@ -281,11 +282,11 @@ def test_marking_without_a_position_uses_the_recorded_one():
 def test_marking_a_thread_uses_the_thread_scope():
     tools = _tools()
     marks = _marks()
-    with isolated_state():
+    with account_env(), isolated_state():
         marks.set_mark(PEER, contiguous=100)  # the whole-chat mark
         with _faked_marking(tools, topic_id=42) as seen:
             payload = json.loads(
-                _run(tools._tg_mark_summarized({"chat": "c", "topic": "general", "up_to": 20}))
+                _run(tools._tg_mark_summarized({"chat": "c", "topic": "general", "up_to": 20, "acknowledge": True}))
             )
 
         assert payload["thread_id"] == "42"
@@ -659,3 +660,162 @@ def test_an_ambiguous_chat_names_the_matches_it_found():
     assert "matches 2" in message
     assert "id 111" in message and "id 222" in message
     assert "will not resolve it" in message
+
+
+def test_a_read_only_account_never_clears_the_badge():
+    tools = _tools()
+    marks = _marks()
+    with account_env(mode="read"), isolated_state():
+        with _faked_marking(tools) as seen:
+            payload = json.loads(
+                _run(tools._tg_mark_summarized({"chat": "c", "up_to": 30, "acknowledge": True}))
+            )
+        assert seen["acks"] == [], "a read-only account must not write read state"
+        assert payload["acknowledged"] is None
+        assert marks.get_mark(PEER)["contiguous"] == 30
+
+
+def test_write_tools_refuse_on_a_read_only_account():
+    tools = _tools()
+    with account_env(mode="read"), isolated_state():
+        for handler, args in (
+            (tools._tg_send_message, {"chat": "c", "text": "hi"}),
+            (tools._tg_forward_messages, {"from_chat": "a", "to_chat": "b", "message_ids": [1]}),
+            (tools._tg_send_reaction, {"chat": "c", "message_id": 1, "reaction": ["👍"]}),
+            (tools._tg_edit_message, {"chat": "c", "message_id": 1, "text": "x"}),
+            (tools._tg_delete_messages, {"chat": "c", "message_ids": [1]}),
+            (tools._tg_pin_message, {"chat": "c", "message_id": 1}),
+            (tools._tg_mark_read, {"chat": "c", "up_to": 5}),
+            (tools._tg_send_file, {"chat": "c", "path": "/tmp/x"}),
+        ):
+            payload = json.loads(_run(handler(args)))
+            assert "read-only" in payload.get("error", ""), handler.__name__
+
+
+def test_state_is_separate_per_account():
+    tools = _tools()
+    marks = _marks()
+    accounts = plugin_module("core.accounts")
+    env = {
+        "HERMES_TG_USER_API_ID": "1", "HERMES_TG_USER_API_HASH": "h",
+        "HERMES_TG_USER_ACCOUNTS": "one,two",
+        "HERMES_TG_USER_ONE_SESSION": "s1", "HERMES_TG_USER_TWO_SESSION": "s2",
+    }
+    old = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    try:
+        with isolated_state() as root:
+            with accounts.use_account("one"):
+                marks.set_mark("123", contiguous=10)
+            with accounts.use_account("two"):
+                assert marks.get_mark("123") is None
+                marks.set_mark("123", contiguous=99)
+            with accounts.use_account("one"):
+                assert marks.get_mark("123")["contiguous"] == 10
+            assert (root / "accounts" / "one").is_dir() and (root / "accounts" / "two").is_dir()
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_account_parameter_is_added_and_routed():
+    tools = _tools()
+
+    class Ctx:
+        def __init__(self):
+            self.tools = []
+
+        def register_tool(self, **kwargs):
+            self.tools.append(kwargs)
+
+    with account_env(name="personal", mode="read"):
+        ctx = Ctx()
+        tools.register_tools(ctx)
+        entry = next(t for t in ctx.tools if t["name"] == "tg_accounts")
+        prop = entry["schema"]["parameters"]["properties"]["account"]
+        assert prop["enum"] == ["personal"]
+        payload = json.loads(_run(entry["handler"]({"account": "personal"})))
+        assert payload["accounts"][0]["mode"] == "read"
+        bad = json.loads(_run(entry["handler"]({"account": "nope"})))
+        assert "unknown Telegram account" in bad["error"]
+
+
+def test_proxy_urls_become_telethon_arguments():
+    accounts = plugin_module("core.accounts")
+    kw = accounts.telethon_proxy_kwargs("socks5://u:p@127.0.0.1:1080")
+    assert kw["proxy"] == {"proxy_type": "socks5", "addr": "127.0.0.1", "port": 1080,
+                           "rdns": True, "username": "u", "password": "p"}
+    assert accounts.telethon_proxy_kwargs("http://h:8080")["proxy"]["proxy_type"] == "http"
+    mt = accounts.telethon_proxy_kwargs("mtproxy://ee00ff@h:443")
+    assert mt["proxy"] == ("h", 443, "ee00ff")
+    assert accounts.telethon_proxy_kwargs(None) == {}
+    assert accounts.proxy_label("socks5://u:p@h:1") == "socks5://h:1"
+
+
+def test_inbox_reads_saved_private_and_collection_chats_and_marks_them():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from telethon.tl import types as tl
+
+    tools = _tools()
+    store = plugin_module("core.state.collections")
+
+    me = tl.User(id=1, is_self=True, first_name="me")
+    friend = tl.User(id=2, first_name="friend")
+    stranger = tl.User(id=3, first_name="stranger")
+    bot = tl.User(id=4, bot=True, first_name="bot")
+    service = tl.User(id=777000, first_name="Telegram")
+    group = tl.Chat(id=50, title="group", photo=tl.ChatPhotoEmpty(), participants_count=3,
+                    date=datetime.now(timezone.utc), version=1)
+    other_group = tl.Chat(id=60, title="other", photo=tl.ChatPhotoEmpty(), participants_count=3,
+                          date=datetime.now(timezone.utc), version=1)
+    history = {1: [1, 2, 3], 2: [10, 11], 3: [20], 4: [30], 777000: [40], 50: [100, 101, 102], 60: [200]}
+
+    def dialog(entity):
+        top = history[entity.id][-1] if entity.id in history else 0
+        return SimpleNamespace(entity=entity, dialog=SimpleNamespace(top_message=top))
+
+    class Client:
+        async def iter_dialogs(self):
+            for e in (me, friend, stranger, bot, service, group, other_group):
+                yield dialog(e)
+
+        async def iter_messages(self, entity, limit=None, min_id=0, reverse=False, **kw):
+            ids = [i for i in history[entity.id] if i > (min_id or 0)]
+            ids = ids if reverse else list(reversed(ids))
+            for i in ids[:limit]:
+                yield SimpleNamespace(id=i, date=datetime.now(timezone.utc), message=f"m{i}",
+                                      out=entity.id == 1, sender=None, sender_id=None,
+                                      reply_to=None, media=None, fwd_from=None, entities=None,
+                                      reply_markup=None, grouped_id=None)
+
+    @contextlib.asynccontextmanager
+    async def fake_client(*a, **k):
+        yield Client()
+
+    with account_env(mode="read"), isolated_state():
+        store.save_collection("watch", members=[{"peer_id": "-50", "thread": None}])
+        original = tools.tool_client
+        tools.tool_client = fake_client
+        try:
+            first = json.loads(_run(tools._tg_read_inbox({})))
+            got = {c["chat_id"]: c for c in first["chats"]}
+            assert set(got) == {"1", "2", "3", "-50"}, sorted(got)
+            assert got["1"]["sources"] == ["saved"] and got["1"]["first_visit"]
+            assert [m["id"] for m in got["-50"]["messages"]] == [100, 101, 102]
+            assert got["2"]["up_to"] == 11
+
+            marked = json.loads(_run(tools._tg_mark_inbox({"marks": first["marks"]})))
+            assert not marked["errors"]
+
+            history[2].append(12)
+            history[50].append(103)
+            second = json.loads(_run(tools._tg_read_inbox({})))
+            got = {c["chat_id"]: [m["id"] for m in c["messages"]] for c in second["chats"]}
+            assert got == {"2": [12], "-50": [103]}, got
+        finally:
+            tools.tool_client = original

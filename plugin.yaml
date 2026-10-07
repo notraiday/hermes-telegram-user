@@ -1,8 +1,7 @@
 name: telegram-user
 label: Telegram User (MTProto)
-kind: platform
-version: 0.11.0
-description: Self-contained MTProto user-account bridge for Hermes with .h commands, reply/media context, unread/folder digests, global search, cached voice STT, aliases, saved chat and forum-thread collections with exclusions and a standing brief, rate-limit protection, media retrieval, contacts, participants, pinned/draft/scheduled surfaces, profile and session diagnostics, and a resumable local archive with offline search. One explicitly scoped tool marks a summarised chat or forum thread as read. No external MCP required.
+version: "0.12.0+rai.1"
+description: Tools over one or more Telegram user accounts (MTProto) — each read-only or read-write, each with its own proxy. Reading, search, unread/folder/inbox digests with local marks, collections, archive with offline search, media and voice transcripts; on write accounts also sending, replies, files, forwards, reactions, edits, deletions, pins and read marks. No chat platform — talk to Hermes through the regular Telegram bot.
 author: community
 # Declared here, not only in requirements.txt: Hermes installs these into its own
 # venv and re-applies them after every `hermes update`, which rebuilds that venv
@@ -10,6 +9,7 @@ author: community
 # in requirements.txt comes back from an update unable to import telethon.
 python_dependencies:
   - "telethon>=1.44,<2"
+  - "python-socks[asyncio]>=2.4,<3"
 requires_env:
   - name: HERMES_TG_USER_API_ID
     description: Telegram API ID from my.telegram.org
@@ -20,20 +20,17 @@ requires_env:
     prompt: Telegram API hash
     password: true
 optional_env:
-  # Deliberately not required: nobody can type a StringSession, and asking for one
-  # during install is how a placeholder ends up in .env. It is produced by
-  # `hermes telegram-user login`, which runs Telegram's real phone/code/2FA flow.
-  - name: HERMES_TG_USER_SESSION
-    description: Telethon StringSession for the user account; produced by `hermes telegram-user login`
-    prompt: Telethon StringSession
-    password: true
-  - name: HERMES_TG_USER_COMMAND
-    description: Command prefix; defaults to .h
-    prompt: Command prefix
+  # Accounts are listed here and logged in with
+  # `hermes telegram-user login --account <name> [--mode write] [--proxy URL]`,
+  # which writes HERMES_TG_USER_<NAME>_SESSION / _MODE / _PROXY. Without the list,
+  # the old single HERMES_TG_USER_SESSION is one read-only account called "default".
+  - name: HERMES_TG_USER_ACCOUNTS
+    description: Comma-separated account names, e.g. personal,agent (the first is the default)
+    prompt: Telegram account names
     password: false
-  - name: HERMES_TG_USER_REPLY_DEPTH
-    description: Reply-chain depth automatically injected for .h replies; 1-5, default 3
-    prompt: Reply context depth
+  - name: HERMES_TG_USER_SEND_FILE_ROOTS
+    description: Directories (separated by ':') that tg_send_file may send files from; unset disables file sending
+    prompt: Directories files may be sent from
     password: false
   - name: HERMES_TG_USER_MAX_MEDIA_MB
     description: Maximum Telegram attachment size cached/downloaded by the plugin; default 50 MB
@@ -56,6 +53,17 @@ optional_env:
     prompt: Telegram plugin state directory
     password: false
 provides_tools:
+  - tg_accounts
+  - tg_read_inbox
+  - tg_mark_inbox
+  - tg_send_message
+  - tg_send_file
+  - tg_forward_messages
+  - tg_send_reaction
+  - tg_edit_message
+  - tg_delete_messages
+  - tg_pin_message
+  - tg_mark_read
   - tg_find_chat
   - tg_list_topics
   - tg_read_messages

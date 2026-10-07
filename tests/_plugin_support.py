@@ -64,3 +64,27 @@ def isolated_state():
         else:
             os.environ["HERMES_TG_USER_STATE_DIR"] = previous
         shutil.rmtree(root, ignore_errors=True)
+
+
+@contextmanager
+def account_env(name="acct", mode="write", extra=None):
+    """Configure one Telegram account in the environment for the duration."""
+    slug = name.upper()
+    values = {
+        "HERMES_TG_USER_API_ID": "1",
+        "HERMES_TG_USER_API_HASH": "hash",
+        "HERMES_TG_USER_ACCOUNTS": name,
+        f"HERMES_TG_USER_{slug}_SESSION": "session",
+        f"HERMES_TG_USER_{slug}_MODE": mode,
+        **(extra or {}),
+    }
+    previous = {key: os.environ.get(key) for key in values}
+    os.environ.update(values)
+    try:
+        yield name
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value

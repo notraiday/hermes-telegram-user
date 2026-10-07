@@ -24,7 +24,7 @@ def _package_sources() -> list[Path]:
 def test_required_files_exist():
     for name in (
         "plugin.yaml",
-        "adapter.py",
+        "core/accounts.py",
         "tools.py",
         "core/archive.py",
         "core/client.py",
@@ -62,35 +62,28 @@ def test_current_hermes_tool_contract_is_present():
     assert "schema={" in source
     assert '"name": name' in source
     assert '"description": description' in source
-    assert '"parameters": parameters' in source
+    assert '"parameters": schema_params' in source
     assert "is_async=True" in source
     assert "check_fn=_check_requirements" in source
     assert "return json.dumps(" in source
 
 
-def test_adapter_uses_current_hermes_event_surface():
-    source = (ROOT / "adapter.py").read_text(encoding="utf-8")
-    assert "self.build_source(" in source
-    assert "SessionSource(" not in source
-    assert "reply_to_text=reply_ctx" in source
-    assert "media_urls=media_urls" in source
-    assert "media_types=media_types" in source
-    assert "MessageType.VOICE" in source
-    assert "utf16_len" in source
-    assert "telegram_error_message" in source
-    assert "sanitize_text" in source
+def test_there_is_no_chat_platform():
+    assert not (ROOT / "adapter.py").exists()
+    for path in _package_sources():
+        assert "register_platform(" not in path.read_text(encoding="utf-8"), path
 
 
 def test_tool_surface_matches_manifest():
     """plugin.yaml is the published contract; tools.py must register exactly that set."""
     manifest = (ROOT / "plugin.yaml").read_text(encoding="utf-8")
     source = (ROOT / "tools.py").read_text(encoding="utf-8")
-    assert "version: 0.11.0" in manifest
+    assert 'version: "0.12.0+rai.1"' in manifest
     published = [
         line.strip()[2:] for line in manifest.splitlines() if line.strip().startswith("- tg_")
     ]
-    assert len(published) == 34
-    assert len(set(published)) == 34
+    assert len(published) == 45
+    assert len(set(published)) == 45
     row_names = re.findall(r'^ {8}"(tg_[a-z_]+)",$', source, re.MULTILINE)
     registered = set(row_names)
     assert registered == set(published), (
@@ -138,52 +131,49 @@ def test_tool_surface_matches_manifest():
         assert tool in published
 
 
-def test_only_one_scoped_tool_may_write_telegram_read_state():
-    """The old rule was 'never acknowledge a read'. The rule is now 'exactly one
-    scoped path'.
+WRITE_TOOLS = (
+    "_tg_send_message",
+    "_tg_send_file",
+    "_tg_forward_messages",
+    "_tg_send_reaction",
+    "_tg_edit_message",
+    "_tg_delete_messages",
+    "_tg_pin_message",
+    "_tg_mark_read",
+)
 
-    Looking at a chat still clears nothing; the single exception is
-    `tg_mark_summarized`, which forwards an explicit message id for one chat or
-    one forum thread, and only after a summary exists.
+
+def test_every_telegram_write_is_gated_by_account_mode():
+    """Writes exist now, but only on accounts with MODE=write.
+
+    Every write handler must call require_write() before it does anything, and the
+    read acknowledgement still lives in exactly one module.
     """
     tools_source = (ROOT / "tools.py").read_text(encoding="utf-8")
-    for forbidden in (
-        '"tg_send_message"',
-        '"tg_reply_message"',
-        '"tg_react"',
-        '"tg_mark_read"',
-    ):
-        assert forbidden not in tools_source, f"{forbidden} would be a bulk Telegram write tool"
+    for name in WRITE_TOOLS:
+        start = tools_source.index(f"async def {name}(")
+        end = tools_source.index("\nasync def ", start + 10) if "\nasync def " in tools_source[start + 10:] else len(tools_source)
+        body = tools_source[start:end]
+        assert "require_write()" in body, f"{name} writes without checking the account mode"
+        first_client = body.find("tool_client()")
+        assert body.find("require_write()") < first_client, f"{name} connects before the mode check"
 
     sources = {
         path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
         for path in _package_sources()
     }
-
-    # The blanket Telethon helper hides the peer-kind dispatch, so it stays banned.
     for name, source in sources.items():
         assert "send_read_acknowledge(" not in source, f"{name} acknowledges reads the invisible way"
-
     acknowledging = sorted(
         name
         for name, source in sources.items()
-        if any(
-            marker in source
-            for marker in (
-                "ReadHistoryRequest(",
-                "ReadDiscussionRequest(",
-                "ReadMentionsRequest(",
-                "ReadReactionsRequest(",
-            )
-        )
+        if any(m in source for m in ("ReadHistoryRequest(", "ReadDiscussionRequest(",
+                                      "ReadMentionsRequest(", "ReadReactionsRequest("))
     )
-    assert acknowledging == ["core/readstate.py"], (
-        f"read acknowledgement must live in exactly one module: {acknowledging}"
-    )
-
-    # ...and be reachable from exactly one tool.
-    assert tools_source.count("acknowledge_read(") == 1
-    assert '"tg_mark_summarized"' in tools_source
+    assert acknowledging == ["core/readstate.py"], acknowledging
+    # tg_mark_summarized only for writable accounts, plus tg_mark_read.
+    assert tools_source.count("acknowledge_read(") == 2
+    assert 'get_account().writable' in tools_source
 
 
 def test_floodwait_and_single_instance_guards_are_wired():
@@ -192,7 +182,6 @@ def test_floodwait_and_single_instance_guards_are_wired():
     assert "TelegramRateLimited" in limits
     assert "note_flood_wait" in limits
     assert "threading.BoundedSemaphore" in limits
-    assert "acquire_gateway_session_lock" in limits
     assert "flood_sleep_threshold=configured_flood_sleep_threshold()" in client
     assert "async with tool_gate()" in client
 

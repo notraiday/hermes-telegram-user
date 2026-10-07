@@ -248,8 +248,21 @@ def _empty_mark() -> dict[str, Any]:
     return {"contiguous": 0, "pending_from_id": None, "pending_top_id": None, "updated_at": None}
 
 
+_CACHE_PATH: Optional[str] = None
+
+
+def _follow_account() -> None:
+    """Drop the in-memory copy when the active account (and so the file) changed."""
+    global _cache, _CACHE_PATH
+    current = str(_path())
+    if _CACHE_PATH != current:
+        _cache = None
+        _CACHE_PATH = current
+
+
 def _load_unlocked() -> dict[str, dict[str, Any]]:
     """Marks as currently known; a missing or corrupt file means "no marks"."""
+    _follow_account()
     global _cache
     if _cache is not None:
         return _cache
@@ -273,6 +286,7 @@ def _load_unlocked() -> dict[str, dict[str, Any]]:
 
 
 def _save_unlocked(marks: dict[str, dict[str, Any]]) -> None:
+    _follow_account()
     global _cache
     path = _path()
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
