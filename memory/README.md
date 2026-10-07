@@ -38,3 +38,7 @@ collections:
     update: "python3 /home/hermes/.hermes/scripts/calendar_export.py /home/hermes/.hermes/state/memory/calendar"
     context: {"/": "Календарь владельца: все события по месяцам"}
 ```
+
+The search server: `qmd mcp --http --host 127.0.0.1 --port 8181` as a user service.
+`--host 127.0.0.1` matters: without it qmd binds `localhost`, which current Node
+resolves to IPv6 `::1` only, and Hermes connecting to `127.0.0.1` finds nothing.
