@@ -4,7 +4,7 @@ Files for a Hermes cron job that files new Telegram messages, vault edits and ca
 changes into the Obsidian vault. They live here because the plugin clone is already on the
 server; Hermes does not load anything from this folder.
 
-- `archiver_check.py` — the pre-run script. Copy it to `~/.hermes/scripts/`. Without the
+- `archiver_check.py` — the pre-run script (quiet hours: `ARCHIVER_QUIET_HOURS`, default `23-8`). Copy it to `~/.hermes/scripts/`. Without the
   model it commits the vault into a local git repository outside the vault, asks Davis for
   calendar changes (WebDAV sync-collection), runs `hermes telegram-user inbox --peek`, and
   prints either a report for the agent or `{"wakeAgent": false}`. State lives in

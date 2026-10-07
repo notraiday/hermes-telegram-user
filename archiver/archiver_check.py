@@ -23,7 +23,9 @@ out of the next report. Edits under ``Агент/`` are never reported.
 Standard library only: Hermes runs .py scripts with its own interpreter and a
 sanitized environment, so the Davis password is read from the Hermes .env here.
 Settings come from the environment or that .env (ARCHIVER_VAULT, DAVIS_URL,
-DAVIS_USER, DAVIS_PASSWORD, ARCHIVER_STATE_DIR, ARCHIVER_HERMES_BIN).
+DAVIS_USER, DAVIS_PASSWORD, ARCHIVER_QUIET_HOURS, ARCHIVER_STATE_DIR,
+ARCHIVER_HERMES_BIN). In the quiet hours (default 23-8) the report tells the agent
+to work silently; the cron schedule decides whether it runs then at all.
 """
 
 from __future__ import annotations
@@ -468,6 +470,18 @@ def telegram_report() -> Optional[str]:
 # --- main ------------------------------------------------------------------------------
 
 
+def quiet_now(now: datetime) -> bool:
+    """Inside ARCHIVER_QUIET_HOURS ("23-8", local time): the archiver works but stays silent."""
+    raw = setting("ARCHIVER_QUIET_HOURS", "23-8")
+    try:
+        start, end = (int(x) % 24 for x in raw.split("-", 1))
+    except ValueError:
+        return False
+    hour = now.hour
+    return start <= hour < end if start < end else (hour >= start or hour < end)
+
+
+
 def main() -> int:
     state = load_state()
     vault = Path(setting("ARCHIVER_VAULT", "/srv/vault"))
@@ -488,8 +502,10 @@ def main() -> int:
     if not sections:
         print(SKIP_GATE)
         return 0
-    now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
-    print(f"# Новое для архиватора ({now})\n\n" + "\n\n".join(sections))
+    now = datetime.now().astimezone()
+    mode = ("Тихие часы: да — отчёт не отправляй, ответь [SILENT]; вопросы только в Агент/Входящие.md."
+            if quiet_now(now) else "Тихие часы: нет.")
+    print(f"# Новое для архиватора ({now.strftime('%Y-%m-%d %H:%M')})\n{mode}\n\n" + "\n\n".join(sections))
     return 0
 
 
