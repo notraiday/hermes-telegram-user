@@ -571,3 +571,20 @@ def test_a_write_by_another_process_is_neither_missed_nor_erased():
         stored = _json.loads(path.read_text(encoding="utf-8"))["marks"]
         assert set(stored) == {"100", "200", "300"}  # and not erased by this process's save
         assert path.with_name(path.name + ".lock").exists()
+
+
+def test_marks_of_groups_channels_and_new_user_ids_survive_a_restart():
+    """Peer ids are not message ids: negative and > 2**31 ids must load back."""
+    from _plugin_support import isolated_state, plugin_module
+
+    with isolated_state():
+        marks = plugin_module("core.state.watermarks")
+        peers = ("-50", "-1001234567890", "6123456789", "777000")
+        for peer in peers:
+            marks.set_mark(peer, contiguous=42)
+        marks.set_mark("-1001234567890", contiguous=7, thread_id=3)
+        marks._cache = None  # what a fresh process sees: only the file
+        marks._CACHE_STAMP = None
+        for peer in peers:
+            assert (marks.get_mark(peer) or {}).get("contiguous") == 42, peer
+        assert marks.get_mark("-1001234567890", 3)["contiguous"] == 7

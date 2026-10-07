@@ -174,15 +174,19 @@ def _stored_scope(key: Any) -> Optional[tuple[str, Optional[str]]]:
     if not isinstance(key, str):
         return None
     peer_raw, sep, thread_raw = key.partition(_THREAD_SEP)
-    peer = _coerce_stored_id(peer_raw)
-    if peer is None:
+    # A peer id is not a message id: groups and channels are negative and user
+    # ids passed 2**31 long ago. Parsed like one, every such mark was dropped on
+    # load, so those chats came back as unread after every restart.
+    try:
+        peer = _peer_key(peer_raw)
+    except ValueError:
         return None
     if not sep:
-        return str(peer), None
+        return peer, None
     thread = _coerce_stored_id(thread_raw)
     if thread is None or thread < 1:
         return None
-    return str(peer), str(thread)
+    return peer, str(thread)
 
 
 def _message_id(value: Any, *, field: str) -> int:
