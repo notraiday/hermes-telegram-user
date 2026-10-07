@@ -2980,7 +2980,7 @@ _TOOL_DEFS = [
     ),
     (
         "tg_send_message",
-        "Send a text message (optionally as a reply or into a forum topic). Write accounts only.",
+        "Send one text message (optionally as a reply or into a forum topic). Write accounts only. To arrange, book or agree on something and get the other side's answer, do not use this and do not wait or poll for replies: use tg_delegate_dialog, then tg_dialog_message; a background job carries the conversation.",
         _tg_send_message,
         _obj(
             {
@@ -3096,7 +3096,7 @@ _TOOL_DEFS = [
     ),
     (
         "tg_delegate_dialog",
-        "Let the agent carry a conversation in one chat on its own, for one goal, until a deadline. The owner approves this once (they are asked automatically); after that tg_dialog_message writes there without asking, and a background job answers replies. Calling it again for the same chat changes the terms (asks again). Works on read-only accounts too: the approval is the permission, for this chat only.",
+        "Use this whenever the owner asks to arrange, agree, book, ask and wait for an answer, or otherwise hold a conversation with someone in Telegram. Lets the agent carry the conversation in one chat on its own, for one goal, until a deadline. The owner approves this once (they are asked automatically); after that tg_dialog_message writes there without asking, and a background job answers replies. Calling it again for the same chat changes the terms (asks again). Works on read-only accounts too: the approval is the permission, for this chat only.",
         _tg_delegate_dialog,
         _obj(
             {
