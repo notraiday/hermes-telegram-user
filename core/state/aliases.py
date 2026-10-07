@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..sanitize import sanitize_name
-from .paths import private_file, state_dir
+from .paths import StateLock, file_stamp, private_file, state_dir
 
-_LOCK = threading.RLock()
+_LOCK = StateLock(lambda: _path())
 _CACHE: Optional[dict[str, dict[str, Any]]] = None
 
 
@@ -23,15 +23,17 @@ def _key(alias: str) -> str:
 
 
 _CACHE_PATH: Optional[str] = None
+_CACHE_STAMP: Optional[tuple[int, int, int]] = None
 
 
 def _follow_account() -> None:
-    """Drop the in-memory copy when the active account (and so the file) changed."""
-    global _CACHE, _CACHE_PATH
-    current = str(_path())
-    if _CACHE_PATH != current:
+    """Drop the in-memory copy when the account changed or another process wrote the file."""
+    global _CACHE, _CACHE_PATH, _CACHE_STAMP
+    path = _path()
+    current, stamp = str(path), file_stamp(path)
+    if _CACHE_PATH != current or _CACHE_STAMP != stamp:
         _CACHE = None
-        _CACHE_PATH = current
+        _CACHE_PATH, _CACHE_STAMP = current, stamp
 
 
 def _load_unlocked() -> dict[str, dict[str, Any]]:
@@ -55,7 +57,7 @@ def _load_unlocked() -> dict[str, dict[str, Any]]:
 
 def _save_unlocked(aliases: dict[str, dict[str, Any]]) -> None:
     _follow_account()
-    global _CACHE
+    global _CACHE, _CACHE_STAMP
     path = _path()
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     payload = json.dumps({"version": 1, "aliases": aliases}, ensure_ascii=False, indent=2)
@@ -63,7 +65,7 @@ def _save_unlocked(aliases: dict[str, dict[str, Any]]) -> None:
     private_file(tmp)
     os.replace(tmp, path)
     private_file(path)
-    _CACHE = aliases
+    _CACHE, _CACHE_STAMP = aliases, file_stamp(path)
 
 
 def get_alias(alias: str) -> Optional[dict[str, Any]]:

@@ -549,3 +549,25 @@ def test_a_repeated_assertion_writes_nothing():
         marks.set_mark(PEER, contiguous=50)
         marks.set_mark(PEER, contiguous=10)
         assert path.read_text(encoding="utf-8") == before, "a no-op must not touch the file"
+
+
+def test_a_write_by_another_process_is_neither_missed_nor_erased():
+    """The gateway, the dashboard and the CLI share the file: none may save a stale copy."""
+    import json as _json
+
+    from _plugin_support import isolated_state, plugin_module
+
+    with isolated_state():
+        marks = plugin_module("core.state.watermarks")
+        marks.set_mark("100", contiguous=5)  # this process now holds a cached copy
+        path = marks._path()
+        data = _json.loads(path.read_text(encoding="utf-8"))
+        data["marks"]["200"] = {"contiguous": 9, "pending_from_id": None,
+                                "pending_top_id": None, "updated_at": None}
+        path.write_text(_json.dumps(data, indent=4), encoding="utf-8")  # "another process"
+
+        assert marks.get_mark("200")["contiguous"] == 9  # seen, not served from the stale copy
+        marks.set_mark("300", contiguous=3)
+        stored = _json.loads(path.read_text(encoding="utf-8"))["marks"]
+        assert set(stored) == {"100", "200", "300"}  # and not erased by this process's save
+        assert path.with_name(path.name + ".lock").exists()

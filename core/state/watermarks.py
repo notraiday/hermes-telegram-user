@@ -65,7 +65,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
 from ..sanitize import sanitize_name
-from .paths import private_file, state_dir
+from .paths import StateLock, file_stamp, private_file, state_dir
 
 __all__ = [
     "advance",
@@ -91,7 +91,7 @@ _MAX_MESSAGE_ID = 2**31 - 1
 #: or pasted string is rejected instead of becoming a key.
 _MAX_PEER_ID_LEN = 40
 
-_LOCK = threading.RLock()
+_LOCK = StateLock(lambda: _path())
 _SCOPE_LOCKS_LOCK = threading.Lock()
 _SCOPE_LOCKS: dict[str, threading.Lock] = {}
 _cache: Optional[dict[str, dict[str, Any]]] = None
@@ -249,15 +249,17 @@ def _empty_mark() -> dict[str, Any]:
 
 
 _CACHE_PATH: Optional[str] = None
+_CACHE_STAMP: Optional[tuple[int, int, int]] = None
 
 
 def _follow_account() -> None:
-    """Drop the in-memory copy when the active account (and so the file) changed."""
-    global _cache, _CACHE_PATH
-    current = str(_path())
-    if _CACHE_PATH != current:
+    """Drop the in-memory copy when the account changed or another process wrote the file."""
+    global _cache, _CACHE_PATH, _CACHE_STAMP
+    path = _path()
+    current, stamp = str(path), file_stamp(path)
+    if _CACHE_PATH != current or _CACHE_STAMP != stamp:
         _cache = None
-        _CACHE_PATH = current
+        _CACHE_PATH, _CACHE_STAMP = current, stamp
 
 
 def _load_unlocked() -> dict[str, dict[str, Any]]:
@@ -287,7 +289,7 @@ def _load_unlocked() -> dict[str, dict[str, Any]]:
 
 def _save_unlocked(marks: dict[str, dict[str, Any]]) -> None:
     _follow_account()
-    global _cache
+    global _cache, _CACHE_STAMP
     path = _path()
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     payload = json.dumps({"version": _VERSION, "marks": marks}, ensure_ascii=False, indent=2)
@@ -295,7 +297,7 @@ def _save_unlocked(marks: dict[str, dict[str, Any]]) -> None:
     private_file(tmp)
     os.replace(tmp, path)
     private_file(path)
-    _cache = marks
+    _cache, _CACHE_STAMP = marks, file_stamp(path)
 
 
 def _row(peer_id: str, thread_id: Optional[str], mark: dict[str, Any]) -> dict[str, Any]:

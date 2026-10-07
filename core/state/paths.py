@@ -80,3 +80,68 @@ def private_file(path: Path) -> Path:
     except OSError:
         pass
     return path
+
+
+# --- several processes, one state file ----------------------------------------------
+#
+# The gateway, the dashboard and `hermes telegram-user ...` are separate processes
+# working on the same files. Each state module keeps an in-memory copy and saves
+# the whole of it, so a copy taken before another process wrote would erase that
+# write. Two guards: the copy is dropped when the file on disk is no longer the
+# one it was read from, and a read-modify-write holds an flock on a sibling file.
+
+try:
+    import fcntl
+except ImportError:  # windows-footgun: ok - no flock there; threads are still serialised
+    fcntl = None  # type: ignore[assignment]
+
+import threading
+from typing import Callable, Optional
+
+
+def file_stamp(path: Path) -> Optional[tuple[int, int, int]]:
+    """Identity of the file's current content as far as the filesystem tells; None if absent."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+class StateLock:
+    """A re-entrant thread lock that also holds ``flock(<file>.lock)`` while held."""
+
+    def __init__(self, path_fn: Callable[[], Path]):
+        self._path_fn = path_fn
+        self._lock = threading.RLock()
+        self._local = threading.local()
+
+    def __enter__(self) -> "StateLock":
+        self._lock.acquire()
+        depth = getattr(self._local, "depth", 0)
+        if depth == 0:
+            self._local.handle = self._lock_file()
+        self._local.depth = depth + 1
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._local.depth -= 1
+        if self._local.depth == 0:
+            handle, self._local.handle = self._local.handle, None
+            if handle is not None:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+                finally:
+                    handle.close()
+        self._lock.release()
+
+    def _lock_file(self):
+        if fcntl is None:
+            return None
+        try:
+            path = self._path_fn()
+            handle = open(path.with_name(path.name + ".lock"), "a")
+        except OSError:
+            return None  # an unwritable state dir fails at the save, with a real error
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        return handle

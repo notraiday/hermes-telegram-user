@@ -55,7 +55,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from ..sanitize import sanitize_name, sanitize_text
-from .paths import private_file, state_dir
+from .paths import StateLock, file_stamp, private_file, state_dir
 
 __all__ = [
     "collections_path",
@@ -83,7 +83,7 @@ _MAX_PEER_ID_LEN = 40
 #: accepted as one.
 _MAX_BRIEF_LEN = 20000
 
-_LOCK = threading.RLock()
+_LOCK = StateLock(lambda: collections_path())
 _CACHE: Optional[dict[str, dict[str, Any]]] = None
 
 
@@ -317,15 +317,17 @@ def _public(key: str, row: dict[str, Any]) -> dict[str, Any]:
 
 
 _CACHE_PATH: Optional[str] = None
+_CACHE_STAMP: Optional[tuple[int, int, int]] = None
 
 
 def _follow_account() -> None:
-    """Drop the in-memory copy when the active account (and so the file) changed."""
-    global _CACHE, _CACHE_PATH
-    current = str(collections_path())
-    if _CACHE_PATH != current:
+    """Drop the in-memory copy when the account changed or another process wrote the file."""
+    global _CACHE, _CACHE_PATH, _CACHE_STAMP
+    path = collections_path()
+    current, stamp = str(path), file_stamp(path)
+    if _CACHE_PATH != current or _CACHE_STAMP != stamp:
         _CACHE = None
-        _CACHE_PATH = current
+        _CACHE_PATH, _CACHE_STAMP = current, stamp
 
 
 def _load_unlocked() -> dict[str, dict[str, Any]]:
@@ -356,7 +358,7 @@ def _load_unlocked() -> dict[str, dict[str, Any]]:
 
 def _save_unlocked(collections: dict[str, dict[str, Any]]) -> None:
     _follow_account()
-    global _CACHE
+    global _CACHE, _CACHE_STAMP
     path = collections_path()
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     ordered = {key: collections[key] for key in sorted(collections)}
@@ -367,7 +369,7 @@ def _save_unlocked(collections: dict[str, dict[str, Any]]) -> None:
     private_file(tmp)
     os.replace(tmp, path)
     private_file(path)
-    _CACHE = collections
+    _CACHE, _CACHE_STAMP = collections, file_stamp(path)
 
 
 def list_collections() -> list[dict[str, Any]]:
