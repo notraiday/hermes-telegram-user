@@ -190,14 +190,19 @@ def text_matches(text: Optional[str], needle: Optional[str]) -> bool:
 def _narrow(path: Path, mode: int, *, what: str) -> None:
     """Take a path down to ``mode``, or fail closed.
 
-    Like every other state file in this plugin, the ``chmod`` is attempted with
-    ``private_file``; unlike them, the *result* is then checked on POSIX and a
-    failure refuses to go on. A file holding somebody's private messages that
-    stayed group- or world-readable while the run reported success is the one
-    outcome worth failing over. Windows ACLs cannot express a Unix mode, so
-    there the check degrades to the best-effort call alone.
+    Like every other state file in this plugin, the ``chmod`` is best effort;
+    unlike them, the *result* is then checked on POSIX and a failure refuses to
+    go on. A file holding somebody's private messages that stayed group- or
+    world-readable while the run reported success is the one outcome worth
+    failing over. Windows ACLs cannot express a Unix mode, so there the check
+    degrades to the best-effort call alone.
+
+    The chmod uses ``mode`` itself, not ``private_file``'s fixed 0600: a
+    directory at 0600 loses its x bit, and its owner can no longer reach the
+    archive inside it.
     """
-    private_file(path)
+    with suppress(OSError):
+        path.chmod(mode)
     if os.name != "posix":
         return
     try:

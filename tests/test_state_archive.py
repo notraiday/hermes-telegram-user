@@ -1,6 +1,7 @@
 """Local archive storage: write, edit, search, window, forget."""
 
 import asyncio
+import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -256,6 +257,17 @@ def test_archive_lives_in_the_state_dir_and_survives_reopen():
             assert archive.count_messages(again, CHAT) == 1
         finally:
             again.close()
+
+
+def test_the_state_directory_stays_enterable_by_its_owner():
+    # The directory is narrowed to 0700, not 0600: without the x bit its owner
+    # cannot reach the archive inside it (root, which runs these tests, can).
+    with isolated_state() as root:
+        archive = _open()
+        root.chmod(0o755)
+        archive.open_archive().close()
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+        assert stat.S_IMODE(archive.archive_path().stat().st_mode) == 0o600
 
 
 def test_chat_key_normalises_the_numeric_forms():
