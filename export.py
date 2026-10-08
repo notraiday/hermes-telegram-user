@@ -23,6 +23,12 @@ Three phases per run, each bounded so a run fits between two index updates:
 * **render** — chats whose archive or media changed are written out again; a
   file is replaced only when its content differs.
 
+How deep the history goes: ``HERMES_TG_USER_EXPORT_DAYS`` (empty or 0 — all of
+it) limits every chat to its last N days, except the chats in
+``HERMES_TG_USER_EXPORT_FULL`` (ids, comma-separated; ``me`` or ``избранное`` for
+Saved Messages), which keep their whole history. The window rolls: months that
+fall out of it are deleted from the export at the next run.
+
 The text is the archive's, not re-fetched: what the export shows is exactly
 what ``tg_archive_search`` would find.
 """
@@ -79,6 +85,30 @@ _VISION_PROMPT = (
 
 def _setting(name: str, default: str = "") -> str:
     return (os.getenv(name) or default).strip()
+
+
+def _history_days() -> int:
+    try:
+        return max(0, int(_setting("HERMES_TG_USER_EXPORT_DAYS", "0") or 0))
+    except ValueError:
+        return 0
+
+
+_SAVED_NAMES = {"me", "self", "saved", "избранное"}
+
+
+def _full_history() -> tuple[set[str], bool]:
+    """(chat ids that keep their whole history, whether Saved Messages does)."""
+    ids, saved = set(), False
+    for token in re.split(r"[,\s]+", _setting("HERMES_TG_USER_EXPORT_FULL")):
+        token = token.strip()
+        if not token:
+            continue
+        if token.lower() in _SAVED_NAMES:
+            saved = True
+        elif re.fullmatch(r"-?\d+", token):
+            ids.add(str(int(token)))
+    return ids, saved
 
 
 def _state_path() -> Path:
@@ -326,12 +356,23 @@ def _line(row: dict[str, Any], chat_dir: Path) -> str:
     return " ".join(parts) + (f": {text}" if text else "")
 
 
-def _render_chat(con, chat: dict[str, Any], chat_dir: Path, threads: Optional[set[int]]) -> int:
+def _drop_media(chat_dir: Path, message_id: int) -> None:
+    for path in [chat_dir / "media" / f"{message_id}.md", *(chat_dir / "files").glob(f"{message_id}.*")]:
+        path.unlink(missing_ok=True)
+
+
+def _render_chat(con, chat: dict[str, Any], chat_dir: Path, threads: Optional[set[int]],
+                 since: Optional[float] = None) -> int:
+    """Write the chat's month files; months with nothing left in them are deleted."""
     months: dict[str, list[str]] = defaultdict(list)
     rows = list(iter_messages(con, chat_id=chat["chat_id"]))
     rows.reverse()
     for row in rows:
         if threads is not None and not ({row.get("topic_id"), row.get("reply_to_msg_id"), row["message_id"]} & threads):
+            continue
+        if since is not None and (row.get("date") or 0) < since:
+            if row.get("media_type"):
+                _drop_media(chat_dir, int(row["message_id"]))
             continue
         when = _local(row.get("date"))
         if when is None:
@@ -348,6 +389,11 @@ def _render_chat(con, chat: dict[str, Any], chat_dir: Path, threads: Optional[se
             "",
         ]
         written += _write_if_changed(chat_dir / f"{month}.md", "\n".join(head + lines) + "\n")
+    if chat_dir.exists():
+        for old in chat_dir.glob("[0-9][0-9][0-9][0-9]-[0-9][0-9].md"):
+            if old.stem not in months:
+                old.unlink()
+                written += 1
     return written
 
 
@@ -366,6 +412,17 @@ async def export_account(out_root: Path, *, sync_seconds: float = 120, ocr: bool
     skipped: dict[str, str] = state.setdefault("media_skip", {})
     report = {"account": account, "synced": 0, "added": 0, "media_done": 0, "media_skipped": 0,
               "files_written": 0, "errors": []}
+    days = _history_days()
+    full_ids, full_saved = _full_history()
+    window_floor = (now - timedelta(days=days)).timestamp() if days else None
+    thread_floor = (now - timedelta(days=min(days or _THREAD_HISTORY_DAYS, _THREAD_HISTORY_DAYS))).timestamp()
+
+    def floor_of(key: str, entry: dict[str, Any]) -> Optional[float]:
+        """The oldest date this chat is exported from, or None for its whole history."""
+        if not entry["whole"]:
+            return thread_floor
+        is_saved = getattr(entry["entity"], "is_self", False) or getattr(entry["entity"], "self", False)
+        return None if key in full_ids or (full_saved and is_saved) else window_floor
 
     member_threads = _inbox_member_threads({})
     meta: dict[str, dict[str, Any]] = {}
@@ -387,20 +444,33 @@ async def export_account(out_root: Path, *, sync_seconds: float = 120, ocr: bool
                 newest = get_watermarks(con, key)["newest"]
                 return newest is None or (chats[key]["top"] or 0) > int(newest)
 
+            def covered(key: str, floor: Optional[float]) -> bool:
+                """History already down to the window's floor (or to the very beginning)."""
+                if get_watermarks(con, key)["whole"]:
+                    return True
+                reached = chats_state.get(key, {}).get("covered_since")
+                return floor is not None and reached is not None and float(reached) <= floor
+
+            report["full_history_missing"] = sorted(full_ids - set(chats))
             order = sorted(chats, key=lambda k: (not behind(k), -(chats[k]["top"] or 0)))
             deadline = time.monotonic() + sync_seconds
             for key in order:
                 if time.monotonic() > deadline:
                     break
-                marks = get_watermarks(con, key)
-                if not behind(key) and marks["whole"]:
-                    continue
                 entry = chats[key]
-                since = None if entry["whole"] else (now - timedelta(days=_THREAD_HISTORY_DAYS))
+                floor = floor_of(key, entry)
+                if not behind(key) and covered(key, floor):
+                    continue
+                since = datetime.fromtimestamp(floor, tz=timezone.utc) if floor is not None else None
                 try:
                     result = await sync_chat(client, con, entry["entity"], max_sync=_SYNC_PER_CHAT, since=since)
                     report["synced"] += 1
                     report["added"] += int(result.get("added") or 0)
+                    # Both walks ended before the budget did, without reaching the first
+                    # message ever: the older one stopped at the date floor.
+                    if (floor is not None and result.get("contiguous") and not result.get("complete")
+                            and int(result.get("scanned") or 0) < _SYNC_PER_CHAT):
+                        chats_state.setdefault(key, {})["covered_since"] = floor
                 except Exception as exc:  # FloodWait and friends: stop syncing for this run
                     report["errors"].append(f"sync {key}: {str(exc)[:200]}")
                     break
@@ -412,7 +482,8 @@ async def export_account(out_root: Path, *, sync_seconds: float = 120, ocr: bool
                     title = "Избранное"
                 meta[key] = {"chat_id": key, "title": title, "kind": chat_kind(entity), "account": account,
                              "dir": out / f"{_slug(title)}__{key}",
-                             "threads": None if entry["whole"] else entry["threads"]}
+                             "threads": None if entry["whole"] else entry["threads"],
+                             "since": floor_of(key, entry)}
 
             # media: new attachments always, the rest only at night
             if ocr and vision_endpoint() is None:
@@ -425,6 +496,8 @@ async def export_account(out_root: Path, *, sync_seconds: float = 120, ocr: bool
                 for key, chat in meta.items():
                     for row in iter_messages(con, chat_id=key):
                         if row.get("media_type") not in _MEDIA_KINDS:
+                            continue
+                        if chat["since"] is not None and (row.get("date") or 0) < chat["since"]:
                             continue
                         item = f"{key}:{row['message_id']}"
                         if item in skipped or (chat["dir"] / "media" / f"{row['message_id']}.md").exists():
@@ -456,8 +529,10 @@ async def export_account(out_root: Path, *, sync_seconds: float = 120, ocr: bool
     try:
         for key, chat in meta.items():
             marks = get_watermarks(con, key)
+            # The window's first day is part of it: as the window rolls, old months go.
+            since_day = _local(chat["since"]).strftime("%Y-%m-%d") if chat["since"] is not None else None
             signature = [marks["messages"], marks["newest"], marks["oldest"],
-                         chats_state.get(key, {}).get("media_rev", 0)]
+                         chats_state.get(key, {}).get("media_rev", 0), since_day]
             previous = chats_state.get(key, {})
             old_dir = previous.get("dir")
             if old_dir and old_dir != chat["dir"].name and (out / old_dir).exists():
@@ -466,7 +541,7 @@ async def export_account(out_root: Path, *, sync_seconds: float = 120, ocr: bool
                 continue
             if not marks["messages"]:
                 continue
-            report["files_written"] += _render_chat(con, chat, chat["dir"], chat["threads"])
+            report["files_written"] += _render_chat(con, chat, chat["dir"], chat["threads"], chat["since"])
             chats_state[key] = {**previous, "signature": signature, "dir": chat["dir"].name}
     finally:
         con.close()

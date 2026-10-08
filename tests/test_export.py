@@ -213,3 +213,58 @@ def test_vision_uses_ollamas_own_api_with_thinking_off(monkeypatch):
     url, payload = calls[0]
     assert url == "http://10.10.10.2:11434/api/chat" and payload["think"] is False
     assert payload["messages"][0]["images"] == ["aW1n"]
+
+
+def test_a_year_of_history_except_the_chats_kept_whole(tmp_path):
+    old = datetime(2025, 3, 1, 9, 0, tzinfo=timezone.utc)  # older than a year before NOW
+    with _setup(tmp_path) as (export, world, out):
+        for peer, mid in ((6000000001, 5), (-50, 90)):
+            world.history[peer].insert(0, _msg(mid, old, "давнее", sender=world.friend))
+        world.history[1] = [_msg(1, old, "давнее", out=True),
+                            _msg(2, datetime(2026, 9, 20, 9, 0, tzinfo=timezone.utc), "купить хлеб", out=True)]
+        report = _run(export, out)  # no limit yet: everything, as before
+        assert (out / "acct/Петя__6000000001/2025-03.md").exists()
+
+        os.environ["HERMES_TG_USER_EXPORT_DAYS"] = "365"
+        os.environ["HERMES_TG_USER_EXPORT_FULL"] = "-50, избранное, -1009999"
+        try:
+            report = _run(export, out)
+            files = sorted(p.relative_to(out).as_posix() for p in out.rglob("*.md"))
+            assert "acct/Петя__6000000001/2025-03.md" not in files  # fell out of the window: deleted
+            assert "acct/Петя__6000000001/2026-10.md" in files
+            assert "acct/Дача__-50/2025-03.md" in files and "acct/Избранное__1/2025-03.md" in files
+            assert report["full_history_missing"] == ["-1009999"]  # not in any collection
+        finally:
+            for name in ("HERMES_TG_USER_EXPORT_DAYS", "HERMES_TG_USER_EXPORT_FULL"):
+                os.environ.pop(name, None)
+
+
+def test_a_chat_whose_year_is_archived_is_not_asked_again(tmp_path):
+    calls = []
+    with _setup(tmp_path, HERMES_TG_USER_EXPORT_DAYS="30") as (export, world, out):
+        world.history[6000000001].insert(0, _msg(5, datetime(2026, 1, 5, tzinfo=timezone.utc), "зима",
+                                                 sender=world.friend))
+        tools = plugin_module("tools")
+        inner = tools.tool_client
+
+        @contextlib.asynccontextmanager
+        async def counting(*a, **k):
+            async with inner(*a, **k) as client:
+                original = client.get_messages
+
+                async def get_messages(entity, *args, **kwargs):
+                    if kwargs.get("ids") is None:
+                        calls.append(getattr(entity, "id", None))
+                    return await original(entity, *args, **kwargs)
+
+                client.get_messages = get_messages
+                yield client
+
+        tools.tool_client = counting
+        _run(export, out)
+        assert not (out / "acct/Петя__6000000001/2026-01.md").exists()  # older than 30 days
+        first = calls.count(6000000001)
+        assert first >= 1
+        calls.clear()
+        report = _run(export, out)
+        assert calls.count(6000000001) == 0 and report["synced"] == 0  # its 30 days are on disk

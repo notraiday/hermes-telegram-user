@@ -18,6 +18,18 @@ every run, old ones only at night (`HERMES_TG_USER_OCR_NIGHT`, default `23-8`).
 `HERMES_TG_USER_VISION_MODEL` / `HERMES_TG_USER_VISION_URL` override the config.
 PDFs with a text layer need `pdftotext`, scanned ones `pdftoppm` (poppler-utils).
 
+How deep the Telegram history goes, in the Hermes `.env`:
+
+```sh
+HERMES_TG_USER_EXPORT_DAYS=365          # every chat: its last 365 days (empty or 0: all of it)
+HERMES_TG_USER_EXPORT_FULL=избранное,-1001234567890,123456789   # these keep their whole history
+```
+
+The window rolls: a month that falls out of it is deleted from the export at the
+next run, together with the recognised attachments in it. A chat listed in
+`EXPORT_FULL` must still be in the export's scope (Saved Messages, private chats,
+collections); one that is not comes back in the run's `full_history_missing`.
+
 `~/.config/qmd/index.yml` (collections part):
 
 ```yaml
