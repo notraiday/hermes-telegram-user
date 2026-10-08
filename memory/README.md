@@ -52,14 +52,14 @@ qmd, then restart the search service:
 
 ```sh
 P=~/.hermes/plugins/telegram-user/memory/qmd-relevance.patch
-Q=$(dirname "$(dirname "$(readlink -f "$(command -v qmd)")")")
+BIN=$(systemctl --user cat qmd-mcp | sed -n 's/^ExecStart=\([^ ]*\).*/\1/p')
+Q=$(dirname "$(dirname "$(readlink -f "$BIN")")")
 cd "$Q" && test -f dist/mcp/server.js || { echo "qmd package not found at $Q"; false; } &&
 if patch -p1 -R --dry-run -s -f < "$P" >/dev/null; then echo "already applied"
 elif patch -p1 --forward --dry-run < "$P"; then patch -p1 --forward < "$P"; fi
 systemctl --user restart qmd-mcp
 ```
 
-The package is found through the `qmd` command itself (npm, bun or a user prefix
-alike). If its directory belongs to root, put `sudo` before the last `patch` (the
+The package is found through the `qmd` the service runs, wherever it is installed. If its directory belongs to root, put `sudo` before the last `patch` (the
 one after `then`).
 A failed hunk means qmd changed; do not force it, the patch needs redoing.
