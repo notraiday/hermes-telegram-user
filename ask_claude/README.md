@@ -32,6 +32,7 @@ Plugins hub of Hermes Desktop:
 | `effort` | `high` | `low` … `max` |
 | `claude_path` | found on `PATH` or in `~/.local/bin` | |
 | `timeout_minutes` | `15` | |
+| `proxy` | the proxy Hermes runs with | HTTP(S) proxy for Claude Code only; Claude Code does not support SOCKS |
 | `token` (secret) | — | stored in `.env` as `ASK_CLAUDE_TOKEN` |
 
 Data: `~/.hermes/plugin-data/ask-claude/` (`log.jsonl`, `names.txt`, `claude/`),

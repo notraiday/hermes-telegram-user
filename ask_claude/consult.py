@@ -31,7 +31,8 @@ from typing import Any, Optional
 PLUGIN_ID = "ask-claude"
 MAX_QUESTION = 6000
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
-DEFAULTS = {"model": "opus", "effort": "high", "claude_path": "", "timeout_minutes": 15}
+DEFAULTS = {"model": "opus", "effort": "high", "claude_path": "", "timeout_minutes": 15, "proxy": ""}
+_PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy")
 
 SYSTEM = (
     "Тебя консультирует локальный ИИ-помощник человека: он сам не справляется с вопросом. "
@@ -296,15 +297,30 @@ def argv(claude: str, conf: dict[str, Any]) -> list[str]:
     ]
 
 
-def child_env(config_dir: Path, home: Path) -> dict[str, str]:
-    """Only what Claude Code needs: no Hermes secrets, no API key that would bill instead."""
+def proxy_url(value: str) -> str:
+    """The proxy for Claude Code: http(s) only — Claude Code does not support SOCKS."""
+    value = str(value or "").strip()
+    if value and not re.match(r"^https?://[^\s/]+", value, re.I):
+        raise ValueError(f"proxy must be an http:// or https:// URL (Claude Code does not support SOCKS): {value.split('@')[-1]}")
+    return value
+
+
+def child_env(config_dir: Path, home: Path, proxy: str = "") -> dict[str, str]:
+    """Only what Claude Code needs: no Hermes secrets, no API key that would bill instead.
+
+    With a proxy set in the plugin settings, Claude Code goes through it and only
+    it does; without one, it inherits whatever proxy Hermes itself runs with.
+    """
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home), "LANG": "C.UTF-8",
            "CLAUDE_CONFIG_DIR": str(config_dir), "CLAUDE_CODE_OAUTH_TOKEN": _token(),
            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_AUTOUPDATER": "1"}
-    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
-                 "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "TZ"):
+    inherited = () if proxy else _PROXY_VARS
+    for name in (*inherited, "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "TZ"):
         if os.environ.get(name):
             env[name] = os.environ[name]
+    if proxy:
+        env.update(HTTPS_PROXY=proxy, https_proxy=proxy, HTTP_PROXY=proxy, http_proxy=proxy,
+                   NO_PROXY="localhost,127.0.0.1", no_proxy="localhost,127.0.0.1")
     return env
 
 
@@ -315,11 +331,12 @@ def ask(text: str) -> dict[str, Any]:
         raise RuntimeError("the claude command is not installed (see the ask-claude README)")
     if not _token():
         raise RuntimeError("no Claude token: run `claude setup-token` and put it into the plugin's token setting")
+    proxy = proxy_url(conf["proxy"])
     config_dir = data_dir() / "claude"
     config_dir.mkdir(mode=0o700, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="ask-claude-") as room:
         done = subprocess.run(argv(claude, conf), input=text, capture_output=True, text=True, cwd=room,
-                              env=child_env(config_dir, Path(room)), timeout=conf["timeout_minutes"] * 60)
+                              env=child_env(config_dir, Path(room), proxy), timeout=conf["timeout_minutes"] * 60)
     try:
         reply = json.loads(done.stdout or "{}")
     except ValueError:

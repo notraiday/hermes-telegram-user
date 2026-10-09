@@ -109,12 +109,28 @@ def test_without_a_token_or_claude_the_tool_is_off(consult, monkeypatch):
 
 
 def test_settings_come_from_the_hermes_config_with_sane_defaults(consult, monkeypatch):
-    assert consult.settings() == {"model": "opus", "effort": "high", "claude_path": "", "timeout_minutes": 15}
+    assert consult.settings() == {"model": "opus", "effort": "high", "claude_path": "", "timeout_minutes": 15,
+                                  "proxy": ""}
     monkeypatch.setattr(consult, "_hermes_config", lambda: {"plugins": {"entries": {"ask-claude": {"settings": {
         "model": "sonnet", "effort": "lots", "timeout_minutes": 999, "other": 1}}}}})
-    assert consult.settings() == {"model": "sonnet", "effort": "high", "claude_path": "", "timeout_minutes": 60}
+    assert consult.settings() == {"model": "sonnet", "effort": "high", "claude_path": "", "timeout_minutes": 60,
+                                  "proxy": ""}
 
 
 def test_long_or_empty_questions_are_refused(consult):
     assert "shorten" in json.loads(consult.handle({"question": "x" * 6001}))["error"]
     assert "needs a question" in json.loads(consult.handle({"question": " "}))["error"]
+
+
+def test_the_proxy_is_claude_codes_alone_and_http_only(consult, tmp_path, monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://hermes-own:3128")
+    env = consult.child_env(tmp_path, tmp_path, consult.proxy_url("http://u:p@10.0.0.108:8080"))
+    assert env["HTTPS_PROXY"] == env["https_proxy"] == env["HTTP_PROXY"] == "http://u:p@10.0.0.108:8080"
+    assert env["NO_PROXY"] == "localhost,127.0.0.1"
+    assert consult.child_env(tmp_path, tmp_path)["HTTPS_PROXY"] == "http://hermes-own:3128"  # none set: inherited
+    with pytest.raises(ValueError, match="SOCKS"):
+        consult.proxy_url("socks5://10.0.0.108:1080")
+    calls = _fake_claude(tmp_path, monkeypatch, consult, {"subtype": "success", "result": "ok"})
+    monkeypatch.setattr(consult, "_hermes_config", lambda: {"plugins": {"entries": {"ask-claude": {"settings": {
+        "claude_path": str(tmp_path / "claude"), "proxy": "socks5://x:1"}}}}})
+    assert "SOCKS" in json.loads(consult.handle({"question": "вопрос"}))["error"] and not calls
