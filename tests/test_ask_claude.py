@@ -134,3 +134,11 @@ def test_the_proxy_is_claude_codes_alone_and_http_only(consult, tmp_path, monkey
     monkeypatch.setattr(consult, "_hermes_config", lambda: {"plugins": {"entries": {"ask-claude": {"settings": {
         "claude_path": str(tmp_path / "claude"), "proxy": "socks5://x:1"}}}}})
     assert "SOCKS" in json.loads(consult.handle({"question": "вопрос"}))["error"] and not calls
+
+
+def test_a_network_failure_points_at_the_proxy_setting(consult, tmp_path, monkeypatch):
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    _fake_claude(tmp_path, monkeypatch, consult, {"subtype": "success", "is_error": True,
+        "result": "API Error: No internet route — check your connection or VPN (EHOSTUNREACH)"})
+    result = json.loads(consult.handle({"question": "вопрос"}))
+    assert "EHOSTUNREACH" in result["error"] and "No proxy is set" in result["hint"]

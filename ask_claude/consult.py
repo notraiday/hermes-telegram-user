@@ -32,6 +32,8 @@ PLUGIN_ID = "ask-claude"
 MAX_QUESTION = 6000
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 DEFAULTS = {"model": "opus", "effort": "high", "claude_path": "", "timeout_minutes": 15, "proxy": ""}
+_NETWORK_ERROR = re.compile(r"EHOSTUNREACH|ENETUNREACH|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN"
+                            r"|No internet route|Unable to connect|proxy", re.I)
 _PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy")
 
 SYSTEM = (
@@ -347,6 +349,10 @@ def ask(text: str) -> dict[str, Any]:
     result: dict[str, Any] = {"model": conf["model"], "effort": conf["effort"]}
     if reply.get("is_error") or reply.get("subtype", "success") != "success":
         result["error"] = str(reply.get("result") or reply.get("subtype") or "Claude Code failed")[:1000]
+        if _NETWORK_ERROR.search(result["error"]):
+            result["hint"] = ("Claude Code could not reach Anthropic. " + (
+                f"Check the proxy set in the ask-claude settings ({proxy.split('@')[-1]})." if proxy else
+                "No proxy is set: the owner sets an HTTP proxy in the ask-claude plugin settings (`proxy`)."))
     else:
         result["answer"] = str(reply.get("result") or "").strip()
     if reply.get("duration_ms") is not None:
