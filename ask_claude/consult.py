@@ -337,6 +337,9 @@ def ask(text: str) -> dict[str, Any]:
     if _token().startswith("sk-ant-api"):
         raise RuntimeError("ASK_CLAUDE_TOKEN holds an API key (sk-ant-api…); the plugin needs the subscription "
                            "token that `claude setup-token` prints (sk-ant-oat…)")
+    if not _token().startswith("sk-ant-"):
+        raise RuntimeError("ASK_CLAUDE_TOKEN does not start with sk-ant-oat: it was copied in part (a double "
+                           "click stops at the dashes); copy the whole token `claude setup-token` printed")
     proxy = proxy_url(conf["proxy"])
     config_dir = data_dir() / "claude"
     config_dir.mkdir(mode=0o700, exist_ok=True)

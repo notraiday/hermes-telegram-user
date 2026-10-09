@@ -154,3 +154,9 @@ def test_a_token_copied_across_lines_still_works_and_an_api_key_is_refused(consu
     assert "setup-token" in result["hint"]
     monkeypatch.setenv("ASK_CLAUDE_TOKEN", "sk-ant-api03-xyz")
     assert "API key" in json.loads(consult.handle({"question": "вопрос"}))["error"] and len(calls) == 1
+
+
+def test_a_token_cut_at_its_dashes_is_named_as_such(consult, tmp_path, monkeypatch):
+    calls = _fake_claude(tmp_path, monkeypatch, consult, {"subtype": "success", "result": "ok"})
+    monkeypatch.setenv("ASK_CLAUDE_TOKEN", "rwF8SrjVUh8a" + "x" * 82)
+    assert "copied in part" in json.loads(consult.handle({"question": "вопрос"}))["error"] and not calls
