@@ -2701,7 +2701,7 @@ def _obj(properties: dict[str, Any], required: Optional[list[str]] = None) -> di
 
 _CHAT = {
     "type": "string",
-    "description": "Chat id, title, @username, or exact saved alias. 'me' (also 'saved', 'избранное') is this account's own Saved Messages; '@saved' is the public username.",
+    "description": "Chat id, title, @username or alias; 'me' = this account's Saved Messages.",
 }
 _COLLECTION = {
     "type": "string",
@@ -3369,11 +3369,7 @@ def _account_schema(parameters: dict[str, Any]) -> dict[str, Any]:
         pass
     prop: dict[str, Any] = {
         "type": "string",
-        "description": (
-            "Telegram account to use"
-            + (f" (default: {names[0]})" if names else "")
-            + ". Write tools work only on accounts with MODE=write."
-        ),
+        "description": "Telegram account" + (f", default {names[0]}" if names else ""),
     }
     if names:
         prop["enum"] = names
