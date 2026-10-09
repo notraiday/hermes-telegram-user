@@ -25,9 +25,9 @@ def _consult():
 def consult(tmp_path, monkeypatch):
     module = _consult()
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setenv("ASK_CLAUDE_API_KEY", "test-key")
-    for name in ("ASK_CLAUDE_MODEL", "ASK_CLAUDE_EFFORT", "ASK_CLAUDE_MONTHLY_USD", "ASK_CLAUDE_NAMES_FILE"):
-        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ASK_CLAUDE_TOKEN", "sk-ant-oat01-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-reach-claude-code")
+    monkeypatch.setattr(module, "_hermes_config", lambda: {})
     monkeypatch.setitem(sys.modules, "plugins.plugin_storage", None)  # outside Hermes
     return module
 
@@ -52,60 +52,69 @@ def test_names_are_masked_in_their_russian_forms(consult):
     assert out == "Спроси [имя], [имя] и [имя] понравилось"
 
 
-def test_the_owner_sees_exactly_what_will_be_sent_and_says_yes_each_time(consult):
-    hook = consult.approval("ask_claude", {"question": "Звонить на +7 912 345-67-89 или писать?"})
-    assert hook["action"] == "approve"
-    assert "Звонить на [телефон] или писать?" in hook["message"] and "912" not in hook["message"]
-    assert "телефон ×1" in hook["message"] and "$0.00 из $20.00" in hook["message"]
-    other = consult.approval("ask_claude", {"question": "Другой вопрос"})
-    assert other["rule_key"] != hook["rule_key"]  # "always" for one question is not for the next
-    assert consult.approval("tg_send_message", {"text": "x"}) is None
+def _fake_claude(tmp_path, monkeypatch, consult, reply):
+    claude = tmp_path / "claude"
+    claude.write_text("#!/bin/sh\n")
+    claude.chmod(0o755)
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout=json.dumps(reply), stderr="")
+
+    monkeypatch.setattr(consult.subprocess, "run", run)
+    monkeypatch.setattr(consult, "_hermes_config", lambda: {"plugins": {"entries": {"ask-claude": {"settings": {
+        "claude_path": str(claude), "model": "fable", "effort": "XHIGH"}}}}})
+    return calls
 
 
-def test_too_long_empty_or_over_the_cap_is_blocked_before_asking(consult, monkeypatch):
-    assert consult.approval("ask_claude", {"question": "x" * 3001})["action"] == "block"
-    assert consult.approval("ask_claude", {"question": "  "})["action"] == "block"
-    consult._log({"ts": consult.datetime.now(consult.timezone.utc).isoformat(), "cost_usd": 20.5})
-    blocked = consult.approval("ask_claude", {"question": "вопрос"})
-    assert blocked["action"] == "block" and "cap" in blocked["message"]
-    monkeypatch.delenv("ASK_CLAUDE_API_KEY")
-    assert consult.available() is False or True  # anthropic may be absent here; the key check is below
-    assert "ASK_CLAUDE_API_KEY" in consult.approval("ask_claude", {"question": "вопрос"})["message"]
-
-
-def test_the_call_sends_the_approved_text_and_logs_its_cost(consult, monkeypatch):
-    sent = {}
-
-    class Messages:
-        def create(self, **kwargs):
-            sent.update(kwargs)
-            return SimpleNamespace(
-                model="claude-opus-5-5", stop_reason="end_turn", _request_id="req_1",
-                usage=SimpleNamespace(input_tokens=1000, output_tokens=2000),
-                content=[SimpleNamespace(type="thinking", thinking=""), SimpleNamespace(type="text", text="Ответ")])
-
-    client = SimpleNamespace(beta=SimpleNamespace(messages=Messages()), messages=Messages())
-    monkeypatch.setattr(consult, "_client", lambda: client)
+def test_the_question_goes_to_claude_code_alone_and_masked(consult, tmp_path, monkeypatch):
+    calls = _fake_claude(tmp_path, monkeypatch, consult,
+                         {"type": "result", "subtype": "success", "is_error": False, "result": "Ответ",
+                          "duration_ms": 41000, "total_cost_usd": 0.31})
     result = json.loads(consult.handle({"question": "Почта ivan@example.com — как лучше?"}))
-    assert result["answer"] == "Ответ" and result["cost_usd"] == 0.044  # 1000*$4 + 2000*$20 per million
-    assert sent["messages"] == [{"role": "user", "content": "Почта [почта] — как лучше?"}]
-    assert sent["model"] == "claude-opus-5-5" and sent["output_config"] == {"effort": "high"}
-    assert sent["fallbacks"] == "default" and sent["betas"] == ["server-side-fallback-2026-07-01"]
-    assert "thinking" not in sent and "temperature" not in sent
+    assert result == {"model": "fable", "effort": "xhigh", "answer": "Ответ", "seconds": 41, "masked": {"почта": 1}}
+    argv, kwargs = calls[0]
+    assert kwargs["input"] == "Почта [почта] — как лучше?"  # only the masked question, on stdin
+    for flag in ("-p", "--safe-mode", "--strict-mcp-config", "--no-session-persistence"):
+        assert flag in argv
+    assert argv[argv.index("--tools") + 1] == "" and argv[argv.index("--model") + 1] == "fable"
+    assert argv[argv.index("--effort") + 1] == "xhigh" and argv[argv.index("--permission-mode") + 1] == "dontAsk"
+    env = kwargs["env"]
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-test"
+    assert "ANTHROPIC_API_KEY" not in env and "ASK_CLAUDE_TOKEN" not in env and "HERMES_HOME" not in env
+    assert env["CLAUDE_CONFIG_DIR"].endswith("plugin-data/ask-claude/claude") and env["HOME"] == kwargs["cwd"]
+    assert not Path(kwargs["cwd"]).exists()  # the empty room is gone
     log = [json.loads(line) for line in consult._log_path().read_text(encoding="utf-8").splitlines()]
     assert log[0]["question"] == "Почта [почта] — как лучше?" and log[0]["answer"] == "Ответ"
     assert oct(consult._log_path().stat().st_mode & 0o777) == "0o600"
     assert oct(consult.data_dir().stat().st_mode & 0o777) == "0o700"
-    assert consult.spent_this_month() == pytest.approx(0.044)
 
 
-def test_a_refusal_is_reported_not_read_as_an_answer(consult, monkeypatch):
-    class Messages:
-        def create(self, **kwargs):
-            return SimpleNamespace(model="claude-opus-5-5", stop_reason="refusal", content=[],
-                                   stop_details=SimpleNamespace(category="cyber"),
-                                   usage=SimpleNamespace(input_tokens=10, output_tokens=0))
-
-    monkeypatch.setattr(consult, "_client", lambda: SimpleNamespace(beta=SimpleNamespace(messages=Messages())))
+def test_a_failed_run_is_reported_not_read_as_an_answer(consult, tmp_path, monkeypatch):
+    _fake_claude(tmp_path, monkeypatch, consult,
+                 {"type": "result", "subtype": "error_max_turns", "is_error": True, "result": ""})
     result = json.loads(consult.handle({"question": "вопрос"}))
-    assert "answer" not in result and "declined" in result["error"] and "cyber" in result["error"]
+    assert "answer" not in result and result["error"] == "error_max_turns"
+
+
+def test_without_a_token_or_claude_the_tool_is_off(consult, monkeypatch):
+    monkeypatch.setattr(consult, "claude_command", lambda configured="": None)
+    assert consult.available() is False
+    assert "not installed" in json.loads(consult.handle({"question": "вопрос"}))["error"]
+    monkeypatch.setattr(consult, "claude_command", lambda configured="": "/usr/bin/true")
+    monkeypatch.delenv("ASK_CLAUDE_TOKEN")
+    assert consult.available() is False
+    assert "setup-token" in json.loads(consult.handle({"question": "вопрос"}))["error"]
+
+
+def test_settings_come_from_the_hermes_config_with_sane_defaults(consult, monkeypatch):
+    assert consult.settings() == {"model": "opus", "effort": "high", "claude_path": "", "timeout_minutes": 15}
+    monkeypatch.setattr(consult, "_hermes_config", lambda: {"plugins": {"entries": {"ask-claude": {"settings": {
+        "model": "sonnet", "effort": "lots", "timeout_minutes": 999, "other": 1}}}}})
+    assert consult.settings() == {"model": "sonnet", "effort": "high", "claude_path": "", "timeout_minutes": 60}
+
+
+def test_long_or_empty_questions_are_refused(consult):
+    assert "shorten" in json.loads(consult.handle({"question": "x" * 6001}))["error"]
+    assert "needs a question" in json.loads(consult.handle({"question": " "}))["error"]

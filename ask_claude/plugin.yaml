@@ -1,35 +1,30 @@
 name: ask-claude
 label: Ask Claude (cloud consult)
-version: "0.1.0"
-description: One tool, ask_claude — the local agent consults cloud Claude on a hard question. The question is scrubbed of personal data by fixed rules, shown to the owner exactly as it will be sent, and sent only after the owner's yes; every call is logged with its cost, under a monthly spending cap.
+version: "0.2.0"
+description: One tool, ask_claude — the local agent consults cloud Claude on a hard question, through Claude Code on the owner's Claude subscription. Only the question leaves, scrubbed of personal data by fixed rules; every call is logged.
 author: community
-python_dependencies:
-  - "anthropic>=1.12,<2"
-requires_env:
-  # Deliberately not ANTHROPIC_API_KEY: Hermes would take that one as a provider
-  # key, and then whole conversations could end up in the cloud.
-  - name: ASK_CLAUDE_API_KEY
-    description: Anthropic API key used only by ask_claude (set a spend limit in the Anthropic console too)
-    prompt: Anthropic API key for ask_claude
-    password: true
-optional_env:
-  - name: ASK_CLAUDE_MODEL
-    description: Model id; default claude-opus-5-5 (claude-fable-5-1 is the strongest and 2.5x the price)
-    prompt: Claude model
-    password: false
-  - name: ASK_CLAUDE_EFFORT
-    description: low, medium, high (default), xhigh or max — how hard the model thinks
-    prompt: Claude effort
-    password: false
-  - name: ASK_CLAUDE_MONTHLY_USD
-    description: Spending cap per calendar month in US dollars, counted from the plugin's own log; default 20
-    prompt: Monthly cap, USD
-    password: false
-  - name: ASK_CLAUDE_NAMES_FILE
-    description: File with names to scrub (one per line); default <plugin data>/names.txt
-    prompt: Names file
-    password: false
-hooks:
-  - pre_tool_call
+# Settings live in config.yaml under plugins.entries.ask-claude.settings and show
+# up in the Plugins hub of Hermes Desktop.
+config_schema:
+  model:
+    type: str
+    default: opus
+    description: Claude Code model — opus, sonnet, fable, or a full model id
+  effort:
+    type: str
+    default: high
+    description: How hard the model thinks — low, medium, high, xhigh or max
+  claude_path:
+    type: str
+    default: ""
+    description: Path to the claude command; empty — found on PATH or in ~/.local/bin
+  timeout_minutes:
+    type: int
+    default: 15
+    description: How long one answer may take
+  token:
+    type: secret
+    env: ASK_CLAUDE_TOKEN
+    description: Token from `claude setup-token` (your Claude subscription). Kept under its own name, never as CLAUDE_CODE_OAUTH_TOKEN, so Hermes itself does not pick it up
 provides_tools:
   - ask_claude

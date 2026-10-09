@@ -1,62 +1,58 @@
-"""ask_claude: scrub, ask the owner, send, log.
+"""ask_claude: scrub the question, ask Claude Code on the owner's subscription, log.
+
+Claude Code is the only client a Claude subscription may be used through, so
+the question goes to a ``claude -p`` run of the unmodified binary: safe mode (no
+CLAUDE.md, skills, plugins, hooks, MCP servers or memory), no tools, an empty
+working directory, its own config directory, and nothing in its environment but
+what it needs. The token is passed to that process only, and is kept under a
+name Hermes does not read (``ASK_CLAUDE_TOKEN``): Hermes picks up
+``CLAUDE_CODE_OAUTH_TOKEN`` and ``~/.claude`` as Anthropic credentials of its
+own, and could then send its own traffic to Claude.
 
 The question is the only thing that leaves: the agent writes it self-contained
-and impersonal, ``scrub`` masks what fixed rules can recognise (phones, e-mail,
-card, passport, SNILS and INN numbers, Telegram handles and links, home network
-addresses, keys and tokens, names from the owner's list), and ``approval`` shows
-the owner the result word for word. The handler sends exactly that result: the
-scrubbing is deterministic, so what was approved is what goes.
+and impersonal, and ``scrub`` masks what fixed rules can recognise (phones,
+e-mail, card, passport, SNILS and INN numbers, Telegram handles and links, home
+network addresses, keys and tokens, names from the owner's list).
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-DEFAULT_MODEL = "claude-opus-5-5"
-DEFAULT_EFFORT = "high"
-DEFAULT_MONTHLY_USD = 20.0
-MAX_QUESTION = 3000
-MAX_TOKENS = 16000
+PLUGIN_ID = "ask-claude"
+MAX_QUESTION = 6000
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
-# USD per million tokens (input, output); a fallback model is priced as itself.
-PRICES = {
-    "claude-fable-5-1": (10.0, 50.0),
-    "claude-opus-5-5": (4.0, 20.0),
-    "claude-opus-5": (5.0, 25.0),
-    "claude-opus-4-8": (5.0, 25.0),
-    "claude-sonnet-5-5": (2.0, 10.0),
-    "claude-haiku-5-5": (0.10, 0.50),
-}
-# Models that take server-side refusal fallbacks ("default" routing).
-_FALLBACK_MODELS = {"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"}
+DEFAULTS = {"model": "opus", "effort": "high", "claude_path": "", "timeout_minutes": 15}
 
 SYSTEM = (
     "Тебя консультирует локальный ИИ-помощник человека: он сам не справляется с вопросом. "
     "Вопрос обезличен — личные данные заменены метками в квадратных скобках ([телефон], [имя], "
-    "[номер] и т.п.); не пытайся их восстановить. Уточнить ничего нельзя: если данных не хватает, "
-    "назови допущения и разбери варианты. Отвечай по-русски, по существу и проверяемо: где важна "
-    "точность, укажи, что стоит перепроверить."
+    "[номер] и т.п.); не пытайся их восстановить. Инструментов и файлов у тебя нет, уточнить ничего "
+    "нельзя: если данных не хватает, назови допущения и разбери варианты. Отвечай по-русски, по "
+    "существу и проверяемо: где важна точность, укажи, что стоит перепроверить."
 )
 
 DESCRIPTION = (
-    "Ask cloud Claude, a much stronger model, one hard question: tricky reasoning or math, a "
-    "plan or decision with many trade-offs, a code or document review, a second opinion when you "
-    "are unsure. Every call costs money and the owner approves it, so use it when your own answer "
-    "would likely be weak, not for lookups (search the web for those). The question leaves the "
-    "house: write it self-contained and impersonal — no names, contacts, addresses, account or "
-    "document numbers, chat excerpts, nothing that identifies the owner or other people; describe "
-    "the situation in general terms. Known personal data is masked automatically ([телефон], "
-    "[имя], ...), but you are the first filter. Claude sees only this text (up to 3000 characters) "
-    "and remembers nothing between calls, so include the context it needs. Numbers of 7 or more "
-    "digits are masked as ids; write big quantities as 4.3e9 or in words. Treat the answer as "
-    "advice: check facts before acting on them."
+    "Ask cloud Claude, a much stronger model, a hard question: tricky reasoning or math, a plan or "
+    "decision with many trade-offs, a code or document review, a second opinion when you are "
+    "unsure. Use it as often as it helps; it is not for lookups (search the web for those). The "
+    "question leaves the house: write it self-contained and impersonal — no names, contacts, "
+    "addresses, account or document numbers, chat excerpts, nothing that identifies the owner or "
+    "other people; describe the situation in general terms. Known personal data is masked "
+    "automatically ([телефон], [имя], ...), but you are the first filter. Numbers of 7 or more "
+    "digits are masked as ids; write big quantities as 4.3e9 or in words. Claude sees only this "
+    "text (up to 6000 characters), has no tools and remembers nothing between calls, so include "
+    "the context it needs. An answer can take a few minutes. Treat it as advice: check facts "
+    "before acting on them."
 )
 
 PARAMETERS = {
@@ -64,7 +60,7 @@ PARAMETERS = {
     "properties": {
         "question": {
             "type": "string",
-            "description": "The whole question with its context, impersonal, up to 3000 characters.",
+            "description": "The whole question with its context, impersonal, up to 6000 characters.",
         },
     },
     "required": ["question"],
@@ -74,24 +70,47 @@ PARAMETERS = {
 # --- settings and files ----------------------------------------------------------------
 
 
-def _setting(name: str, default: str = "") -> str:
-    return (os.getenv(name) or default).strip()
+def _hermes_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser()
 
 
-def model() -> str:
-    return _setting("ASK_CLAUDE_MODEL", DEFAULT_MODEL)
-
-
-def effort() -> str:
-    value = _setting("ASK_CLAUDE_EFFORT", DEFAULT_EFFORT).lower()
-    return value if value in EFFORTS else DEFAULT_EFFORT
-
-
-def monthly_cap() -> float:
+def _hermes_config() -> dict[str, Any]:
     try:
-        return max(0.0, float(_setting("ASK_CLAUDE_MONTHLY_USD", str(DEFAULT_MONTHLY_USD))))
-    except ValueError:
-        return DEFAULT_MONTHLY_USD
+        from hermes_cli.config import load_config
+
+        config = load_config()
+        if isinstance(config, dict):
+            return config
+    except Exception:
+        pass
+    try:
+        import yaml
+
+        data = yaml.safe_load((_hermes_home() / "config.yaml").read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def settings() -> dict[str, Any]:
+    """plugins.entries.ask-claude.settings from Hermes' config, over the defaults."""
+    entry = ((_hermes_config().get("plugins") or {}).get("entries") or {}).get(PLUGIN_ID) or {}
+    raw = entry.get("settings") if isinstance(entry, dict) else None
+    merged = dict(DEFAULTS)
+    if isinstance(raw, dict):
+        merged.update({k: v for k, v in raw.items() if k in DEFAULTS and v not in (None, "")})
+    merged["effort"] = str(merged["effort"]).lower()
+    if merged["effort"] not in EFFORTS:
+        merged["effort"] = DEFAULTS["effort"]
+    try:
+        merged["timeout_minutes"] = max(1, min(60, int(merged["timeout_minutes"])))
+    except (TypeError, ValueError):
+        merged["timeout_minutes"] = DEFAULTS["timeout_minutes"]
+    return merged
+
+
+def _token() -> str:
+    return (os.getenv("ASK_CLAUDE_TOKEN") or "").strip()
 
 
 def data_dir() -> Path:
@@ -99,10 +118,9 @@ def data_dir() -> Path:
     try:
         from plugins.plugin_storage import plugin_data_dir
 
-        path = Path(plugin_data_dir("ask-claude"))
+        path = Path(plugin_data_dir(PLUGIN_ID))
     except Exception:
-        home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser()
-        path = home / "plugin-data" / "ask-claude"
+        path = _hermes_home() / "plugin-data" / PLUGIN_ID
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         path.chmod(0o700)
@@ -116,35 +134,16 @@ def _log_path() -> Path:
 
 
 def names() -> list[str]:
-    """Names to mask, one per line in the names file; # starts a comment."""
-    path = Path(_setting("ASK_CLAUDE_NAMES_FILE") or data_dir() / "names.txt").expanduser()
+    """Names to mask, one per line in <plugin data>/names.txt; # starts a comment."""
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = (data_dir() / "names.txt").read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
     return [line.split("#", 1)[0].strip() for line in lines if line.split("#", 1)[0].strip()]
 
 
-def spent_this_month(now: Optional[datetime] = None) -> float:
-    month = (now or datetime.now(timezone.utc)).strftime("%Y-%m")
-    total = 0.0
-    try:
-        with _log_path().open(encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if str(row.get("ts", "")).startswith(month):
-                    total += float(row.get("cost_usd") or 0)
-    except OSError:
-        pass
-    return total
-
-
 def _log(row: dict[str, Any]) -> None:
-    path = _log_path()
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    fd = os.open(_log_path(), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
@@ -251,144 +250,106 @@ def scrub(text: str, extra_names: Optional[list[str]] = None) -> tuple[str, Coun
     return out.strip(), found
 
 
-# --- the owner's yes ----------------------------------------------------------------------
-
-
 def prepare(args: dict[str, Any]) -> tuple[str, Counter]:
     question = str((args or {}).get("question") or "").strip()
     if not question:
         raise ValueError("ask_claude needs a question")
     if len(question) > MAX_QUESTION:
-        raise ValueError(f"the question is {len(question)} characters; shorten it to {MAX_QUESTION} "
-                         "(the owner reads all of it before it is sent)")
+        raise ValueError(f"the question is {len(question)} characters; shorten it to {MAX_QUESTION}")
     text, found = scrub(question)
     if not text:
         raise ValueError("nothing is left of the question after masking personal data")
     return text, found
 
 
-def _found_line(found: Counter) -> str:
-    return ", ".join(f"{what} ×{n}" for what, n in sorted(found.items()))
+# --- the call: Claude Code, alone in an empty room ----------------------------------------
 
 
-def _budget_error() -> Optional[str]:
-    if not _setting("ASK_CLAUDE_API_KEY"):
-        return "ASK_CLAUDE_API_KEY is not set"
-    spent, cap = spent_this_month(), monthly_cap()
-    if spent >= cap:
-        return (f"the monthly cap for ask_claude is reached (${spent:.2f} of ${cap:.2f}); "
-                "the owner can raise ASK_CLAUDE_MONTHLY_USD")
+def claude_command(configured: str = "") -> Optional[str]:
+    candidates = [configured] if configured else []
+    candidates += [shutil.which("claude") or "", str(Path.home() / ".local" / "bin" / "claude")]
+    for candidate in candidates:
+        path = Path(candidate).expanduser() if candidate else None
+        if path and path.is_file() and os.access(path, os.X_OK):
+            return str(path)
     return None
 
 
-def approval(*args: Any, **kwargs: Any) -> Optional[dict[str, Any]]:
-    """pre_tool_call: every ask_claude call shows the owner the exact text and waits for a yes.
-
-    Hermes lets a call through when a hook raises, so nothing here may: any
-    failure blocks the call. In cron there is nobody to say yes, and Hermes
-    refuses the call there.
-    """
-    try:
-        tool_name = kwargs.get("tool_name", args[0] if args else None)
-        if tool_name != "ask_claude":
-            return None
-        call = kwargs.get("args", args[1] if len(args) > 1 else None) or {}
-        call = call if isinstance(call, dict) else {}
-        problem = _budget_error()
-        if problem:
-            return {"action": "block", "message": problem}
-        try:
-            text, found = prepare(call)
-        except ValueError as exc:
-            return {"action": "block", "message": str(exc)}
-        spent, cap = spent_this_month(), monthly_cap()
-        lines = [
-            f"Отправить вопрос в облачный Claude ({model()}, {effort()})? "
-            f"Потрачено в этом месяце ${spent:.2f} из ${cap:.2f}. Уйдёт ровно этот текст:",
-            "",
-            text,
-        ]
-        if found:
-            lines += ["", f"Замаскировано: {_found_line(found)}."]
-        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-        # A per-call key: "always" for one question must not approve the next one.
-        return {"action": "approve", "message": "\n".join(lines), "rule_key": f"ask_claude:{digest}"}
-    except Exception:
-        return {"action": "block", "message": "Could not prepare the approval for ask_claude."}
-
-
-# --- the call -------------------------------------------------------------------------------
-
-
 def available() -> bool:
-    try:
-        import anthropic  # noqa: F401
-    except Exception:
-        return False
-    return bool(_setting("ASK_CLAUDE_API_KEY"))
+    return bool(_token()) and claude_command(str(settings()["claude_path"] or "")) is not None
 
 
-def _client():
-    import anthropic
+def argv(claude: str, conf: dict[str, Any]) -> list[str]:
+    return [
+        claude, "-p",
+        "--safe-mode",                      # no CLAUDE.md, skills, plugins, hooks, MCP, memory
+        "--tools", "",                      # no built-in tools
+        "--disallowedTools", "mcp__*",
+        "--strict-mcp-config",
+        "--permission-mode", "dontAsk",
+        "--max-turns", "2",
+        "--no-session-persistence",
+        "--output-format", "json",
+        "--model", str(conf["model"]),
+        "--effort", str(conf["effort"]),
+        "--system-prompt", SYSTEM,
+    ]
 
-    return anthropic.Anthropic(api_key=_setting("ASK_CLAUDE_API_KEY"), timeout=900.0, max_retries=2)
 
-
-def _cost(usage: Any, served: str, requested: str) -> float:
-    price_in, price_out = PRICES.get(served) or PRICES.get(requested) or PRICES[DEFAULT_MODEL]
-    tokens_in = int(getattr(usage, "input_tokens", 0) or 0)
-    tokens_in += int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
-    tokens_in += int(getattr(usage, "cache_read_input_tokens", 0) or 0)
-    tokens_out = int(getattr(usage, "output_tokens", 0) or 0)
-    return round((tokens_in * price_in + tokens_out * price_out) / 1_000_000, 4)
+def child_env(config_dir: Path, home: Path) -> dict[str, str]:
+    """Only what Claude Code needs: no Hermes secrets, no API key that would bill instead."""
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(home), "LANG": "C.UTF-8",
+           "CLAUDE_CONFIG_DIR": str(config_dir), "CLAUDE_CODE_OAUTH_TOKEN": _token(),
+           "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_AUTOUPDATER": "1"}
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
+                 "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "TZ"):
+        if os.environ.get(name):
+            env[name] = os.environ[name]
+    return env
 
 
 def ask(text: str) -> dict[str, Any]:
-    requested = model()
-    request: dict[str, Any] = {
-        "model": requested,
-        "max_tokens": MAX_TOKENS,
-        "system": SYSTEM,
-        "output_config": {"effort": effort()},
-        "messages": [{"role": "user", "content": text}],
-    }
-    client = _client()
-    if requested in _FALLBACK_MODELS:
-        response = client.beta.messages.create(betas=["server-side-fallback-2026-07-01"],
-                                               fallbacks="default", **request)
+    conf = settings()
+    claude = claude_command(str(conf["claude_path"] or ""))
+    if claude is None:
+        raise RuntimeError("the claude command is not installed (see the ask-claude README)")
+    if not _token():
+        raise RuntimeError("no Claude token: run `claude setup-token` and put it into the plugin's token setting")
+    config_dir = data_dir() / "claude"
+    config_dir.mkdir(mode=0o700, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="ask-claude-") as room:
+        done = subprocess.run(argv(claude, conf), input=text, capture_output=True, text=True, cwd=room,
+                              env=child_env(config_dir, Path(room)), timeout=conf["timeout_minutes"] * 60)
+    try:
+        reply = json.loads(done.stdout or "{}")
+    except ValueError:
+        reply = {}
+    if not isinstance(reply, dict) or not reply:
+        detail = (done.stderr or done.stdout or "").strip()[-500:]
+        raise RuntimeError(f"claude exited with {done.returncode}: {detail or 'no output'}")
+    result: dict[str, Any] = {"model": conf["model"], "effort": conf["effort"]}
+    if reply.get("is_error") or reply.get("subtype", "success") != "success":
+        result["error"] = str(reply.get("result") or reply.get("subtype") or "Claude Code failed")[:1000]
     else:
-        response = client.messages.create(**request)
-    served = str(getattr(response, "model", "") or requested)
-    cost = _cost(getattr(response, "usage", None), served, requested)
-    result: dict[str, Any] = {"model": served, "cost_usd": cost}
-    if response.stop_reason == "refusal":
-        details = getattr(response, "stop_details", None)
-        result["error"] = ("Claude declined to answer"
-                           + (f" ({details.category})" if getattr(details, "category", None) else ""))
-    else:
-        answer = "\n".join(block.text for block in response.content if getattr(block, "type", "") == "text")
-        result["answer"] = answer.strip()
-        if response.stop_reason == "max_tokens":
-            result["note"] = "the answer was cut off at the length limit"
-    result["request_id"] = getattr(response, "_request_id", None)
+        result["answer"] = str(reply.get("result") or "").strip()
+    if reply.get("duration_ms") is not None:
+        result["seconds"] = round(float(reply["duration_ms"]) / 1000)
     return result
 
 
 def handle(args: Optional[dict[str, Any]] = None, **kwargs: Any) -> str:
     try:
-        problem = _budget_error()
-        if problem:
-            return json.dumps({"error": problem}, ensure_ascii=False)
         text, found = prepare(dict(args or {}))
         result = ask(text)
-        spent = spent_this_month() + float(result.get("cost_usd") or 0)
-        try:  # the answer is paid for: a log that cannot be written must not lose it
-            _log({"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "requested_model": model(),
-                  "effort": effort(), "question": text, "masked": dict(found), **result})
+        try:  # the answer is already there: a log that cannot be written must not lose it
+            _log({"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "question": text,
+                  "masked": dict(found), **result})
         except OSError as exc:
-            result["note"] = (result.get("note", "") + f"; not logged: {exc}").lstrip("; ")
-        result["spent_this_month_usd"] = round(spent, 2)
-        result.pop("request_id", None)
+            result["note"] = f"not logged: {exc}"
+        if found:
+            result["masked"] = dict(found)
         return json.dumps(result, ensure_ascii=False)
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "Claude did not answer in time; ask a narrower question"}, ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"error": f"{type(exc).__name__}: {str(exc)[:500]}"}, ensure_ascii=False)
