@@ -142,3 +142,15 @@ def test_a_network_failure_points_at_the_proxy_setting(consult, tmp_path, monkey
         "result": "API Error: No internet route — check your connection or VPN (EHOSTUNREACH)"})
     result = json.loads(consult.handle({"question": "вопрос"}))
     assert "EHOSTUNREACH" in result["error"] and "No proxy is set" in result["hint"]
+
+
+def test_a_token_copied_across_lines_still_works_and_an_api_key_is_refused(consult, tmp_path, monkeypatch):
+    monkeypatch.setenv("ASK_CLAUDE_TOKEN", '"sk-ant-oat01-abc\n  def ghi"')
+    assert consult._token() == "sk-ant-oat01-abcdefghi"
+    calls = _fake_claude(tmp_path, monkeypatch, consult, {"subtype": "success", "is_error": True,
+                                                          "result": "Failed to authenticate. API Error: 401 Invalid bearer token"})
+    result = json.loads(consult.handle({"question": "вопрос"}))
+    assert calls[0][1]["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-abcdefghi"
+    assert "setup-token" in result["hint"]
+    monkeypatch.setenv("ASK_CLAUDE_TOKEN", "sk-ant-api03-xyz")
+    assert "API key" in json.loads(consult.handle({"question": "вопрос"}))["error"] and len(calls) == 1

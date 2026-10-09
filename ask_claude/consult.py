@@ -113,7 +113,8 @@ def settings() -> dict[str, Any]:
 
 
 def _token() -> str:
-    return (os.getenv("ASK_CLAUDE_TOKEN") or "").strip()
+    """The setup-token, without the line breaks and spaces a terminal copy adds to it."""
+    return re.sub(r"\s+", "", os.getenv("ASK_CLAUDE_TOKEN") or "").strip("'\"")
 
 
 def data_dir() -> Path:
@@ -333,6 +334,9 @@ def ask(text: str) -> dict[str, Any]:
         raise RuntimeError("the claude command is not installed (see the ask-claude README)")
     if not _token():
         raise RuntimeError("no Claude token: run `claude setup-token` and put it into the plugin's token setting")
+    if _token().startswith("sk-ant-api"):
+        raise RuntimeError("ASK_CLAUDE_TOKEN holds an API key (sk-ant-api…); the plugin needs the subscription "
+                           "token that `claude setup-token` prints (sk-ant-oat…)")
     proxy = proxy_url(conf["proxy"])
     config_dir = data_dir() / "claude"
     config_dir.mkdir(mode=0o700, exist_ok=True)
@@ -349,7 +353,10 @@ def ask(text: str) -> dict[str, Any]:
     result: dict[str, Any] = {"model": conf["model"], "effort": conf["effort"]}
     if reply.get("is_error") or reply.get("subtype", "success") != "success":
         result["error"] = str(reply.get("result") or reply.get("subtype") or "Claude Code failed")[:1000]
-        if _NETWORK_ERROR.search(result["error"]):
+        if re.search(r"\b401\b|invalid bearer|authenticat", result["error"], re.I):
+            result["hint"] = ("Anthropic rejected the token. The owner re-runs `claude setup-token` and pastes "
+                              "the whole token (one line, starts with sk-ant-oat) into the ask-claude token setting.")
+        elif _NETWORK_ERROR.search(result["error"]):
             result["hint"] = ("Claude Code could not reach Anthropic. " + (
                 f"Check the proxy set in the ask-claude settings ({proxy.split('@')[-1]})." if proxy else
                 "No proxy is set: the owner sets an HTTP proxy in the ask-claude plugin settings (`proxy`)."))
