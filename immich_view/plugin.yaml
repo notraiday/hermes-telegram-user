@@ -1,0 +1,19 @@
+name: immich-view
+label: Immich photos for the agent's eyes
+version: "0.1.0"
+description: One tool, immich_view_photo — fetches photos from the owner's Immich by asset id (from the immich search tools) and hands them to the model as images, with date, place and people as a caption. Read-only, local network only.
+author: community
+# The Immich address comes from the immich MCP server's IMMICH_BASE_URL in
+# config.yaml unless set here; the key is the same IMMICH_API_KEY (it needs the
+# asset.view permission besides asset.read).
+config_schema:
+  base_url:
+    type: str
+    default: ""
+    description: Immich address, e.g. http://10.0.0.110:2283; empty — taken from mcp_servers.immich.env.IMMICH_BASE_URL
+  max_side:
+    type: int
+    default: 1024
+    description: Longest side in pixels the photo is shrunk to before the model sees it (fewer pixels — fewer tokens)
+provides_tools:
+  - immich_view_photo
