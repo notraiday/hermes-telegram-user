@@ -1056,3 +1056,17 @@ def test_mark_all_starts_from_now_without_reading_any_chat(capsys, tmp_path):
             assert cli.run_command(args) == 2  # one mode at a time
         finally:
             tools.tool_client = original
+
+
+def test_forward_label_names_the_source_not_the_forwarder():
+    from types import SimpleNamespace
+
+    helpers = plugin_module("core.helpers")
+    plain = SimpleNamespace(fwd_from=None)
+    assert helpers.forward_label(plain) is None
+    hidden = SimpleNamespace(fwd_from=SimpleNamespace(date=None, from_name="Аноним", post_author=None,
+                                                      channel_post=None), forward=None)
+    assert helpers.forward_label(hidden) == "Аноним"
+    unknown = SimpleNamespace(fwd_from=SimpleNamespace(date=None, from_name=None, post_author=None,
+                                                       channel_post=None), forward=None)
+    assert helpers.forward_label(unknown) == "неизвестно кого"

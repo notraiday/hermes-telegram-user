@@ -25,6 +25,11 @@ HERMES_TG_USER_EXPORT_DAYS=365          # every chat: its last 365 days (empty o
 HERMES_TG_USER_EXPORT_FULL=избранное,-1001234567890,123456789   # these keep their whole history
 ```
 
+Forwards are marked in the export (`я, переслано от «Медуза»`): the archive keeps
+each message's forward origin, and rows archived before it did are re-fetched by
+id, a hundred per request, within the run's sync time (`forwards_checked` in the
+run's JSON) until all are known.
+
 The window rolls: a month that falls out of it is deleted from the export at the
 next run, together with the recognised attachments in it. A chat listed in
 `EXPORT_FULL` must still be in the export's scope (Saved Messages, private chats,

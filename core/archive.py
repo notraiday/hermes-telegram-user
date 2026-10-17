@@ -22,7 +22,7 @@ from datetime import datetime
 from typing import Any, Callable, Optional
 
 from .client import entity_label
-from .helpers import bounded_int, parse_dt, peer_id
+from .helpers import bounded_int, forward_label, parse_dt, peer_id
 from .media import media_info
 from .sanitize import sanitize_name, sanitize_text
 from .state.aliases import aliases_for_peer
@@ -170,6 +170,8 @@ def _stored(message: Any, chat_id: str) -> dict[str, Any]:
         "topic_id": getattr(reply, "reply_to_top_id", None),
         "media_type": (media or {}).get("kind"),
         "edited_at": epoch_of(getattr(message, "edit_date", None)),
+        "forwarded_from": forward_label(message),
+        "forward_checked": True,
     }
 
 
@@ -437,6 +439,8 @@ def _archived_row(row: dict[str, Any], chat: dict[str, Any]) -> dict[str, Any]:
         entry["text_truncated"] = True
     if row["edited_at"] is not None:
         entry["edited_at"] = iso_of(row["edited_at"])
+    if row.get("forwarded_from"):
+        entry["forwarded_from"] = row["forwarded_from"]
     if row["media_type"]:
         # The kind only: the archive records that a message had a photo, and
         # leaves fetching the photo to the media tools and their own quota.

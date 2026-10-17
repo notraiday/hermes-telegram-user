@@ -218,6 +218,24 @@ def _forwarded_info(message: Any) -> Optional[dict[str, Any]]:
     return out or {"unknown_origin": True}
 
 
+def forward_label(message: Any) -> Optional[str]:
+    """Who a forwarded message originally came from, as one short label; None if not forwarded.
+
+    The channel or group first (with the post's signature), then the person, then
+    the name Telegram shows for someone who hides their account.
+    """
+    info = _forwarded_info(message)
+    if not info:
+        return None
+    if info.get("from_chat"):
+        author = f", {info['post_author']}" if info.get("post_author") else ""
+        return f"{info['from_chat']}{author}"
+    for key in ("from_user", "from_name", "post_author"):
+        if info.get(key):
+            return str(info[key])
+    return "неизвестно кого"
+
+
 def message_to_dict(message: Any, *, chat: Any = None) -> dict[str, Any]:
     sender = getattr(message, "sender", None)
     reply = getattr(message, "reply_to", None)

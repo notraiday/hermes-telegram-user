@@ -276,3 +276,28 @@ def test_chat_key_normalises_the_numeric_forms():
         assert archive.chat_key("-1001234567890") == "-1001234567890"
         assert archive.chat_key(" -1001234567890 ") == "-1001234567890"
         assert archive.chat_key(-1001234567890) == "-1001234567890"
+
+
+def test_forward_origin_is_kept_and_an_older_file_gains_the_columns(tmp_path):
+    import sqlite3
+    archive = _open()
+    path = tmp_path / "old.sqlite3"
+    old = sqlite3.connect(path)  # the message table as an older build wrote it
+    old.executescript(archive.ARCHIVE_SCHEMA.replace(
+        "    forwarded_from  TEXT,\n", "").replace("    forward_checked INTEGER NOT NULL DEFAULT 0,\n", ""))
+    assert "forwarded_from" not in [r[1] for r in old.execute("PRAGMA table_info(archived_messages)")]
+    old.close()
+    path.chmod(0o600)
+    con = archive.open_archive(path)
+    try:
+        archive.register_chat(con, chat_id=CHAT, kind="channel", title="Dev")
+        archive.store_messages(con, [_row(1, "своё"), {**_row(2, "чужое"), "outgoing": True,
+                                                         "forwarded_from": "Медуза", "forward_checked": True}])
+        assert archive.unchecked_forwards(con, CHAT) == [1]
+        archive.store_messages(con, [_row(2, "чужое, правка")])  # a re-store that knows nothing of forwards
+        rows = {r["message_id"]: r for r in archive.iter_messages(con, chat_id=CHAT)}
+        assert rows[2]["forwarded_from"] == "Медуза" and rows[2]["forward_checked"]  # not erased
+        assert archive.set_forwards(con, CHAT, {1: None}) == 0
+        assert archive.unchecked_forwards(con, CHAT) == []
+    finally:
+        con.close()

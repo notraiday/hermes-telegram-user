@@ -57,7 +57,8 @@ from .core.client import entity_label
 from .core.helpers import peer_id
 from .core.media import media_info
 from .core.sanitize import sanitize_name, sanitize_text
-from .core.state.archive import get_watermarks, iter_messages, open_archive
+from .core.state.archive import get_watermarks, iter_messages, open_archive, set_forwards, unchecked_forwards
+from .core.helpers import forward_label
 from .core.state.paths import private_file, state_dir
 from .tools import _inbox_member_threads, _inbox_scopes, _inbox_tz
 
@@ -65,6 +66,7 @@ __all__ = ["export_account"]
 
 _STATE_FILE = "export_state.json"
 _SYNC_PER_CHAT = 1000
+_FORWARD_BATCH = 100  # ids per get_messages call when filling in forward origins
 _THREAD_HISTORY_DAYS = 365  # a forum thread in a collection: last year only
 _FRESH_MEDIA = timedelta(days=2)
 _MEDIA_KINDS = {"photo", "document"}
@@ -343,6 +345,8 @@ def _media_summary(chat_dir: Path, message_id: int) -> Optional[str]:
 def _line(row: dict[str, Any], chat_dir: Path) -> str:
     when = _local(row.get("date"))
     who = "я" if row.get("outgoing") else (row.get("sender") or row.get("sender_id") or "?")
+    if row.get("forwarded_from"):
+        who += f", переслано от «{row['forwarded_from']}»"
     parts = [f"[{when.strftime('%d.%m %H:%M') if when else '?'}] #{row['message_id']} {who}"]
     if row.get("reply_to_msg_id"):
         parts.append(f"↩#{row['reply_to_msg_id']}")
@@ -385,7 +389,8 @@ def _render_chat(con, chat: dict[str, Any], chat_dir: Path, threads: Optional[se
             "---", "source: telegram", f"account: {_yaml(chat['account'])}", f"chat: {_yaml(chat['title'])}",
             f"chat_id: {_yaml(chat['chat_id'])}", f"kind: {chat['kind']}", f"month: {month}", "---",
             f"# {chat['title']} — {_MONTHS[int(mm) - 1]} {year}",
-            "«я» — владелец; «→ media/…» — распознанный текст вложения рядом в папке media.",
+            "«я» — владелец; «переслано от …» — чужой текст, пересланный в чат, а не слова отправителя; "
+            "«→ media/…» — распознанный текст вложения рядом в папке media.",
             "",
         ]
         written += _write_if_changed(chat_dir / f"{month}.md", "\n".join(head + lines) + "\n")
@@ -410,8 +415,8 @@ async def export_account(out_root: Path, *, sync_seconds: float = 120, ocr: bool
     state = _load_state()
     chats_state: dict[str, Any] = state.setdefault("chats", {})
     skipped: dict[str, str] = state.setdefault("media_skip", {})
-    report = {"account": account, "synced": 0, "added": 0, "media_done": 0, "media_skipped": 0,
-              "files_written": 0, "errors": []}
+    report = {"account": account, "synced": 0, "added": 0, "forwards_checked": 0, "media_done": 0,
+              "media_skipped": 0, "files_written": 0, "errors": []}
     days = _history_days()
     full_ids, full_saved = _full_history()
     window_floor = (now - timedelta(days=days)).timestamp() if days else None
@@ -475,6 +480,32 @@ async def export_account(out_root: Path, *, sync_seconds: float = 120, ocr: bool
                     report["errors"].append(f"sync {key}: {str(exc)[:200]}")
                     break
 
+            # forwards: rows archived before the plugin kept the forward origin get
+            # it now, re-fetched by id, newest first, within what is left of the time
+            for key in order:
+                if time.monotonic() > deadline:
+                    break
+                floor = floor_of(key, chats[key])
+                ids = unchecked_forwards(con, key, since=floor, limit=_FORWARD_BATCH * 5)
+                labelled = 0
+                try:
+                    for start in range(0, len(ids), _FORWARD_BATCH):
+                        if time.monotonic() > deadline:
+                            break
+                        batch = ids[start:start + _FORWARD_BATCH]
+                        fetched = await client.get_messages(chats[key]["entity"], ids=batch)
+                        fetched = fetched if isinstance(fetched, list) else [fetched]
+                        found = {int(m.id): forward_label(m) for m in fetched if m is not None}
+                        labels = {mid: found.get(mid) for mid in batch}  # gone from Telegram: not a forward
+                        labelled += set_forwards(con, key, labels)
+                        report["forwards_checked"] += len(batch)
+                except Exception as exc:  # FloodWait and friends: carry on next run
+                    report["errors"].append(f"forwards {key}: {str(exc)[:200]}")
+                    break
+                finally:
+                    if labelled:
+                        chats_state.setdefault(key, {})["fwd_rev"] = chats_state.get(key, {}).get("fwd_rev", 0) + 1
+
             for key, entry in chats.items():
                 entity = entry["entity"]
                 title = sanitize_name(entity_label(entity), limit=120)
@@ -532,7 +563,8 @@ async def export_account(out_root: Path, *, sync_seconds: float = 120, ocr: bool
             # The window's first day is part of it: as the window rolls, old months go.
             since_day = _local(chat["since"]).strftime("%Y-%m-%d") if chat["since"] is not None else None
             signature = [marks["messages"], marks["newest"], marks["oldest"],
-                         chats_state.get(key, {}).get("media_rev", 0), since_day]
+                         chats_state.get(key, {}).get("media_rev", 0), since_day,
+                         chats_state.get(key, {}).get("fwd_rev", 0)]
             previous = chats_state.get(key, {})
             old_dir = previous.get("dir")
             if old_dir and old_dir != chat["dir"].name and (out / old_dir).exists():

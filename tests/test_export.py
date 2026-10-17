@@ -46,6 +46,7 @@ class _World:
         self.group = tl.Chat(id=50, title="Дача", photo=tl.ChatPhotoEmpty(), participants_count=3,
                              date=NOW, version=1)
         sep = datetime(2026, 9, 20, 9, 0, tzinfo=timezone.utc)
+        self.fetched_ids = []
         self.history = {
             1: [_msg(1, sep, "купить хлеб", out=True)],
             6000000001: [_msg(10, sep, "привет", sender=self.friend),
@@ -74,6 +75,9 @@ class _World:
 
             async def get_messages(self, entity, limit=None, max_id=0, min_id=0, ids=None):
                 rows = world.history[peer(entity)]
+                if isinstance(ids, list):
+                    world.fetched_ids.extend(ids)
+                    return [next((m for m in rows if m.id == i), None) for i in ids]
                 if ids is not None:
                     return next((m for m in rows if m.id == ids), None)
                 picked = [m for m in rows if (not max_id or m.id < max_id) and m.id > (min_id or 0)]
@@ -268,3 +272,43 @@ def test_a_chat_whose_year_is_archived_is_not_asked_again(tmp_path):
         calls.clear()
         report = _run(export, out)
         assert calls.count(6000000001) == 0 and report["synced"] == 0  # its 30 days are on disk
+
+
+def _forward(msg, channel):
+    msg.fwd_from = SimpleNamespace(date=msg.date, from_name=None, post_author=None, channel_post=7)
+    msg.forward = SimpleNamespace(chat=SimpleNamespace(title=channel, username=None, id=1001), sender=None)
+    return msg
+
+
+def test_a_forward_is_marked_as_someone_elses_words(tmp_path, monkeypatch):
+    with _setup(tmp_path) as (export, world, out):
+        helpers = plugin_module("core.helpers")
+        monkeypatch.setattr(helpers, "entity_label", lambda e: getattr(e, "title", None) or getattr(e, "first_name", "?"))
+        world.history[1].append(_forward(_msg(2, NOW - timedelta(days=1), "Курс доллара упал", out=True), "Медуза"))
+        _run(export, out)
+        saved = (out / "acct/Избранное__1/2026-10.md").read_text(encoding="utf-8")
+        assert "#2 я, переслано от «Медуза»: Курс доллара упал" in saved
+        assert "чужой текст" in saved  # the file header explains the mark
+
+
+def test_messages_archived_before_forwards_were_kept_get_them_filled_in(tmp_path, monkeypatch):
+    with _setup(tmp_path) as (export, world, out):
+        helpers = plugin_module("core.helpers")
+        monkeypatch.setattr(helpers, "entity_label", lambda e: getattr(e, "title", None) or getattr(e, "first_name", "?"))
+        archive = plugin_module("core.state.archive")
+        world.history[1].append(_forward(_msg(2, NOW - timedelta(days=1), "Курс доллара упал", out=True), "Медуза"))
+        _run(export, out)
+        con = archive.open_archive()  # make it look like an archive from before the column existed
+        con.execute("UPDATE archived_messages SET forwarded_from = NULL, forward_checked = 0")
+        con.close()
+        state = export._load_state()
+        state["chats"]["1"]["signature"] = None  # pretend the old file was rendered without the mark
+        export._save_state(state)
+        (out / "acct/Избранное__1/2026-10.md").write_text("old", encoding="utf-8")
+        world.fetched_ids.clear()
+
+        report = _run(export, out)
+        assert report["forwards_checked"] >= 2 and set(world.fetched_ids) >= {1, 2}
+        assert "#2 я, переслано от «Медуза»" in (out / "acct/Избранное__1/2026-10.md").read_text(encoding="utf-8")
+        world.fetched_ids.clear()
+        assert _run(export, out)["forwards_checked"] == 0 and not world.fetched_ids  # done once

@@ -92,6 +92,11 @@ CREATE TABLE IF NOT EXISTS archived_messages (
     -- Kept because an edit moves it: the row-level evidence that what is
     -- stored is the text as it stands now, not as it was first sent.
     edited_at       REAL,
+    -- Who a forwarded message originally came from (a label), NULL when it is
+    -- not a forward. `forward_checked` says whether that is known: rows stored
+    -- before the column existed are 0 until a re-fetch fills them in.
+    forwarded_from  TEXT,
+    forward_checked INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (chat_id, message_id),
     FOREIGN KEY (chat_id) REFERENCES archived_chats(chat_id) ON DELETE CASCADE
 );
@@ -109,8 +114,8 @@ CREATE INDEX IF NOT EXISTS archived_messages_date_idx
 _STORE_SQL = """
 INSERT INTO archived_messages (
     chat_id, message_id, date, sender_id, sender, sender_username, outgoing, text,
-    text_truncated, reply_to_msg_id, topic_id, media_type, edited_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    text_truncated, reply_to_msg_id, topic_id, media_type, edited_at, forwarded_from, forward_checked
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(chat_id, message_id) DO UPDATE SET
     date = COALESCE(excluded.date, archived_messages.date),
     sender_id = COALESCE(excluded.sender_id, archived_messages.sender_id),
@@ -122,7 +127,10 @@ ON CONFLICT(chat_id, message_id) DO UPDATE SET
     reply_to_msg_id = COALESCE(excluded.reply_to_msg_id, archived_messages.reply_to_msg_id),
     topic_id = COALESCE(excluded.topic_id, archived_messages.topic_id),
     media_type = COALESCE(excluded.media_type, archived_messages.media_type),
-    edited_at = COALESCE(excluded.edited_at, archived_messages.edited_at)
+    edited_at = COALESCE(excluded.edited_at, archived_messages.edited_at),
+    forwarded_from = CASE WHEN excluded.forward_checked
+                          THEN excluded.forwarded_from ELSE archived_messages.forwarded_from END,
+    forward_checked = MAX(excluded.forward_checked, archived_messages.forward_checked)
 """
 
 
@@ -287,9 +295,12 @@ def _add_missing_columns(con: sqlite3.Connection) -> None:
     case of a column added to a table that ``CREATE TABLE IF NOT EXISTS`` will
     not touch.
     """
-    for column in ("pending_from_id INTEGER", "pending_top_id INTEGER"):
+    for table, column in (("archived_chats", "pending_from_id INTEGER"),
+                          ("archived_chats", "pending_top_id INTEGER"),
+                          ("archived_messages", "forwarded_from TEXT"),
+                          ("archived_messages", "forward_checked INTEGER NOT NULL DEFAULT 0")):
         with suppress(sqlite3.OperationalError):  # already there
-            con.execute(f"ALTER TABLE archived_chats ADD COLUMN {column}")  # noqa: S608
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")  # noqa: S608
 
 
 @contextmanager
@@ -403,6 +414,8 @@ def _stored_row(item: Mapping[str, Any]) -> tuple[Any, ...]:
         _int_of(item.get("topic_id")),
         _text_of(item.get("media_type"), _MEDIA_LIMIT),
         _float_of(item.get("edited_at")),
+        _text_of(item.get("forwarded_from"), _SENDER_LIMIT),
+        int(bool(item.get("forward_checked"))),
     )
 
 
@@ -420,6 +433,32 @@ def store_messages(con: sqlite3.Connection, messages: Sequence[Mapping[str, Any]
     with _transaction(con):
         con.executemany(_STORE_SQL, rows)
     return len(rows)
+
+
+def unchecked_forwards(con: sqlite3.Connection, chat_id: Any, *, since: Optional[float] = None,
+                       limit: int = 500) -> list[int]:
+    """Ids of stored messages whose forward origin is not known yet, newest first."""
+    args: list[Any] = [chat_key(chat_id)]
+    clause = ""
+    if since is not None:
+        clause = " AND date >= ?"
+        args.append(float(since))
+    args.append(int(limit))
+    rows = con.execute(
+        "SELECT message_id FROM archived_messages WHERE chat_id = ? AND forward_checked = 0"  # noqa: S608
+        f"{clause} ORDER BY message_id DESC LIMIT ?", args).fetchall()
+    return [int(r[0]) for r in rows]
+
+
+def set_forwards(con: sqlite3.Connection, chat_id: Any, labels: Mapping[int, Optional[str]]) -> int:
+    """Record the forward origin (None: not a forward) of stored messages; returns how many were labelled."""
+    key = chat_key(chat_id)
+    with _transaction(con):
+        con.executemany(
+            "UPDATE archived_messages SET forwarded_from = ?, forward_checked = 1 "
+            "WHERE chat_id = ? AND message_id = ?",
+            [(_text_of(label, _SENDER_LIMIT), key, int(mid)) for mid, label in labels.items()])
+    return sum(1 for label in labels.values() if label)
 
 
 def set_watermarks(
@@ -498,6 +537,8 @@ def _message_from(row: sqlite3.Row) -> dict[str, Any]:
         "topic_id": row["topic_id"],
         "media_type": _text_of(row["media_type"], _MEDIA_LIMIT),
         "edited_at": row["edited_at"],
+        "forwarded_from": _text_of(row["forwarded_from"], _SENDER_LIMIT),
+        "forward_checked": bool(row["forward_checked"]),
     }
 
 
