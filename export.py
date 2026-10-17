@@ -67,6 +67,7 @@ __all__ = ["export_account"]
 _STATE_FILE = "export_state.json"
 _SYNC_PER_CHAT = 1000
 _FORWARD_BATCH = 100  # ids per get_messages call when filling in forward origins
+_FORWARD_PAUSE = 1.0  # seconds between those calls: Telegram rate-limits GetMessages by id
 _THREAD_HISTORY_DAYS = 365  # a forum thread in a collection: last year only
 _FRESH_MEDIA = timedelta(days=2)
 _MEDIA_KINDS = {"photo", "document"}
@@ -405,6 +406,18 @@ def _render_chat(con, chat: dict[str, Any], chat_dir: Path, threads: Optional[se
 # --- the run ---------------------------------------------------------------------------------
 
 
+async def _fetch_waiting(client, entity, ids: list[int], deadline: float):
+    """get_messages by ids, sitting out a flood wait when it ends before the run's deadline."""
+    while True:
+        try:
+            return await client.get_messages(entity, ids=ids)
+        except Exception as exc:
+            wait = getattr(exc, "seconds", None)  # telethon's FloodWaitError
+            if not isinstance(wait, (int, float)) or time.monotonic() + wait + 1 > deadline:
+                raise
+            await asyncio.sleep(wait + 1)
+
+
 async def export_account(out_root: Path, *, sync_seconds: float = 120, ocr: bool = False,
                          ocr_seconds: float = 240, now: Optional[datetime] = None) -> dict[str, Any]:
     from .tools import tool_client  # looked up at call time, so tests can swap it
@@ -493,12 +506,13 @@ async def export_account(out_root: Path, *, sync_seconds: float = 120, ocr: bool
                         if time.monotonic() > deadline:
                             break
                         batch = ids[start:start + _FORWARD_BATCH]
-                        fetched = await client.get_messages(chats[key]["entity"], ids=batch)
+                        fetched = await _fetch_waiting(client, chats[key]["entity"], batch, deadline)
                         fetched = fetched if isinstance(fetched, list) else [fetched]
                         found = {int(m.id): forward_label(m) for m in fetched if m is not None}
                         labels = {mid: found.get(mid) for mid in batch}  # gone from Telegram: not a forward
                         labelled += set_forwards(con, key, labels)
                         report["forwards_checked"] += len(batch)
+                        await asyncio.sleep(_FORWARD_PAUSE)
                 except Exception as exc:  # FloodWait and friends: carry on next run
                     report["errors"].append(f"forwards {key}: {str(exc)[:200]}")
                     break

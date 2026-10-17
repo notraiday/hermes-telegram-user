@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _plugin_support import account_env, isolated_state, plugin_module  # noqa: E402
@@ -115,6 +117,7 @@ def _setup(tmp_path, **env):
 
 
 def _run(export, out, **kw):
+    export._FORWARD_PAUSE = 0
     return asyncio.run(export.export_account(out, now=kw.pop("now", NOW), **kw))
 
 
@@ -312,3 +315,32 @@ def test_messages_archived_before_forwards_were_kept_get_them_filled_in(tmp_path
         assert "#2 я, переслано от «Медуза»" in (out / "acct/Избранное__1/2026-10.md").read_text(encoding="utf-8")
         world.fetched_ids.clear()
         assert _run(export, out)["forwards_checked"] == 0 and not world.fetched_ids  # done once
+
+
+def test_a_short_flood_wait_is_sat_out_not_given_up_on(monkeypatch):
+    export = plugin_module("export")
+    calls = []
+
+    class FloodWait(Exception):
+        seconds = 0
+
+    class Client:
+        async def get_messages(self, entity, ids=None):
+            calls.append(ids)
+            if len(calls) == 1:
+                raise FloodWait("A wait of 0 seconds is required")
+            return []
+
+    import time as _time
+    assert asyncio.run(export._fetch_waiting(Client(), None, [1, 2], _time.monotonic() + 60)) == []
+    assert calls == [[1, 2], [1, 2]]
+
+    class LongWait(Exception):
+        seconds = 3600
+
+    class Slow:
+        async def get_messages(self, entity, ids=None):
+            raise LongWait("A wait of 3600 seconds is required")
+
+    with pytest.raises(LongWait):  # longer than the run has left: given up, carried on next run
+        asyncio.run(export._fetch_waiting(Slow(), None, [1], _time.monotonic() + 60))
