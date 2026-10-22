@@ -1,0 +1,36 @@
+name: copyparty-share
+label: Copyparty share links, owner and calendar only
+version: "0.1.0"
+description: One tool, copyparty_share — the agent shares a file or folder from its own Copyparty folder as a temporary link. The link may reach only the owner (the agent's reply, send_message to the home channel) and the calendar; a pre_tool_call guard blocks any other tool call that carries one of its links.
+author: community
+# Copyparty itself decides what may be shared: the agent's account can create
+# shares only from the volume with the shr_who volflag set for it.
+config_schema:
+  base_url:
+    type: str
+    default: ""
+    description: Copyparty address on the local network, e.g. http://10.0.0.125:3923
+  user:
+    type: str
+    default: agent
+    description: The agent's Copyparty account
+  password:
+    type: secret
+    env: COPYPARTY_AGENT_PASSWORD
+    description: Password of that account (the same one the webdav MCP server uses)
+  folder:
+    type: str
+    default: /agent
+    description: The agent's own folder; only things inside it are shared
+  days:
+    type: int
+    default: 7
+    description: How long a link lives unless the agent asks for less (at most 30 days)
+  link_tools:
+    type: str
+    default: "mcp_calendar_*"
+    description: Tools a link may be passed to besides send_message to the home channel, comma-separated; * at the end matches a prefix
+hooks:
+  - pre_tool_call
+provides_tools:
+  - copyparty_share
