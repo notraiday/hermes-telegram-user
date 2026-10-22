@@ -245,12 +245,19 @@ def _allowed(tool_name: str, call: dict[str, Any], patterns: list[str]) -> bool:
         # A bare platform name ("telegram") is that platform's home channel: the owner.
         target = str(call.get("target") or "").strip()
         return call.get("action", "send") == "send" and bool(re.fullmatch(r"[a-z_]+", target))
+    # MCP tools are mcp__<server>__<tool> in current Hermes, mcp_<server>_<tool> in older
+    # ones, and hyphens become underscores: compare with runs of _ and - folded to one _.
+    name = _fold(tool_name)
     for pattern in patterns:
-        if pattern.endswith("*") and tool_name.startswith(pattern[:-1]):
+        if pattern.endswith("*") and name.startswith(_fold(pattern[:-1])):
             return True
-        if tool_name == pattern:
+        if name == _fold(pattern):
             return True
     return False
+
+
+def _fold(name: str) -> str:
+    return re.sub(r"[_-]+", "_", name.strip().lower())
 
 
 def _entries(tool_name: str, call: dict[str, Any]) -> list[tuple[str, Any]]:

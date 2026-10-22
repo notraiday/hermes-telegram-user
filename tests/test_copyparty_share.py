@@ -120,6 +120,10 @@ def test_the_link_reaches_only_the_owner_and_the_calendar(copyparty):
     # The owner: send_message to a home channel, and the calendar.
     assert guard("send_message", {"target": "telegram", "message": f"Билеты: {url}"}) is None
     assert guard("mcp_calendar_create_event", {"summary": "Поезд", "description": url}) is None
+    assert guard("mcp__calendar__update_event", {"calendarUrl": "/dav/cal/", "description": url}) is None
+    assert guard("tool_call", {"calls": [{"name": "mcp__calendar__update_event",
+                                          "arguments": {"description": url}}]}) is None
+    assert guard("mcp__calendarx__update_event", {"description": url})["action"] == "block"
     # Anyone else: other chats, Telegram accounts, mail, notes, the cloud, files.
     for tool, args in [
         ("send_message", {"target": "telegram:123456", "message": url}),

@@ -9,7 +9,8 @@ unless the `folder` setting narrows it to one folder.
 The link stays with the owner. Every link made is remembered, and a
 `pre_tool_call` hook blocks any tool call whose arguments carry one, except
 `send_message` to a home channel (a bare platform name such as `telegram`) and
-the tools in `link_tools` (default `mcp_calendar_*`). The agent's reply to the
+the tools in `link_tools` (default `mcp_calendar_*`, which also matches
+Hermes' `mcp__calendar__…` names: runs of `_` and `-` count as one). The agent's reply to the
 owner is not a tool call and is not touched. The share key is matched with
 separators and case ignored, so a link broken up with spaces is still caught;
 calls through tool search's `tool_call` bridge are judged by the tool inside.
