@@ -1,9 +1,9 @@
-"""Share a file or folder from the agent's Copyparty folder; keep the link with the owner.
+"""Share a file or folder from Copyparty; keep the link with the owner.
 
 ``copyparty_share`` asks Copyparty (``POST /?share``, the call its web UI
-makes) for a temporary read-only link to something inside the agent's own
-folder. Copyparty itself refuses shares from anywhere else: the agent's
-account may share only from the volume whose ``shr_who`` volflag allows it.
+makes) for a temporary read-only link to anything the agent's account can
+read (or, with the ``folder`` setting, only to things inside that folder).
+Copyparty checks the account's read access and the volume's ``shr_who``.
 
 Every link made here is remembered (``shares.json`` in the plugin's data
 folder), and ``guard`` — a ``pre_tool_call`` hook — blocks any tool call whose
@@ -29,24 +29,24 @@ from pathlib import Path
 from typing import Any, Optional
 
 PLUGIN_ID = "copyparty-share"
-DEFAULTS = {"base_url": "", "user": "agent", "folder": "/agent", "days": 7, "link_tools": "mcp_calendar_*"}
+DEFAULTS = {"base_url": "", "user": "agent", "folder": "/", "days": 7, "link_tools": "mcp_calendar_*"}
 MAX_DAYS = 30
 KEY_LENGTH = 20
 _KEY_ALPHABET = string.ascii_letters + string.digits
 
 DESCRIPTION = (
-    "Make a temporary read-only download link to a file or folder in your own Copyparty folder "
-    "(put the thing there first with the webdav tools). The link is for the owner only: put it "
+    "Make a temporary read-only download link to a file or folder in Copyparty (any path you can "
+    "list with the webdav tools). The link is for the owner only: put it "
     "in your reply to the owner or in a calendar event. Any other tool refuses it — never send "
-    "it to other people, chats, mail or notes. path: inside your folder, e.g. 'report.pdf' or "
-    "'trip/' (a trailing / shares the folder). days: how long it works, default 7, at most 30. "
+    "it to other people, chats, mail or notes. path: the Copyparty path, e.g. '/fileshare/report.pdf' "
+    "or '/fileshare/trip/' (a trailing / shares the folder). days: how long it works, default 7, at most 30. "
     "password: optional."
 )
 
 PARAMETERS = {
     "type": "object",
     "properties": {
-        "path": {"type": "string", "description": "File or folder (ending with /) inside your Copyparty folder."},
+        "path": {"type": "string", "description": "Copyparty path of a file, or of a folder ending with /."},
         "days": {"type": "integer", "description": "Days the link works, 1 to 30; default 7."},
         "password": {"type": "string", "description": "Optional password for the link."},
     },
@@ -150,10 +150,10 @@ def _remember(share: dict[str, Any]) -> None:
 
 
 def _inside(folder: str, path: str) -> str:
-    """The Copyparty path of ``path`` (relative to the agent's folder, or absolute inside it)."""
+    """The Copyparty path of ``path`` (relative to ``folder``, or absolute inside it)."""
     raw = str(path or "").strip().replace("\\", "/")
     if not raw or "\x00" in raw:
-        raise ValueError("pass path: a file or folder inside your Copyparty folder")
+        raise ValueError("pass path: a Copyparty file or folder")
     is_dir = raw.endswith("/")
     if raw.startswith("/") and (raw.rstrip("/") + "/").startswith(folder + "/"):
         rel = raw[len(folder):]
@@ -162,6 +162,8 @@ def _inside(folder: str, path: str) -> str:
     parts = [p for p in rel.split("/") if p not in ("", ".")]
     if ".." in parts:
         raise ValueError("path may not contain ..")
+    if not parts and folder == "/":
+        raise ValueError("pass a file or folder, not the whole of Copyparty")
     joined = posixpath.join(folder, *parts) if parts else folder
     return joined + "/" if (is_dir or not parts) else joined
 
@@ -187,12 +189,12 @@ def _create(conf: dict[str, Any], vpath: str, days: int, password: str) -> tuple
 def _hint(message: str) -> str:
     lowered = message.lower()
     if "perms to create shares" in lowered:
-        return " (Copyparty: the agent's folder needs the volflag shr_who: auth)"
+        return " (Copyparty: this volume does not let the agent share; set shr-who: auth, or the volflag shr_who: auth)"
     if "sharing must be disabled" in lowered:
         return " (Copyparty: shares are off; set shr: /share in [global])"
     if "dont have all the perms" in lowered:
-        return (" (the agent cannot read that path: its folder must be a Copyparty volume it can read,"
-                " see the plugin's folder setting; or the password is wrong)")
+        return (" (the agent cannot read that path — check it with webdav_list_remote_directory; "
+                "or the password is wrong)")
     if "not found on disk" in lowered:
         return " (no such file; check the name with webdav_list_remote_directory)"
     return ""

@@ -38,7 +38,7 @@ def copyparty(monkeypatch, tmp_path):
             vp = body["vp"][0]
             if password != "secret":
                 reply, status = "you dont have all the perms you tried to grant", 400
-            elif not vp.startswith("/agent/"):
+            elif vp.startswith("/remain/"):
                 reply, status = "you dont have perms to create shares from this volume", 400
             elif vp.endswith("missing.pdf"):
                 reply, status = "selected file not found on disk: 'missing.pdf'", 400
@@ -62,39 +62,49 @@ def copyparty(monkeypatch, tmp_path):
     server.shutdown()
 
 
-def test_a_file_in_the_agents_folder_becomes_a_read_only_link(copyparty, tmp_path):
+def test_any_readable_file_becomes_a_read_only_link(copyparty, tmp_path):
     share, seen, _ = copyparty
-    result = json.loads(share.handle({"path": "trip/tickets.pdf", "days": 3}))
+    result = json.loads(share.handle({"path": "fileshare/trip/tickets.pdf", "days": 3}))
     assert result["url"].startswith("http://10.0.0.125:3923/share/") and result["url"].endswith("/tickets.pdf")
-    assert result["path"] == "/agent/trip/tickets.pdf"
+    assert result["path"] == "/fileshare/trip/tickets.pdf"
     path, auth, ctype, body = seen[-1]
     assert path == "/?share" and ctype == "application/json"
     assert base64.b64decode(auth.split()[1]).decode() == "agent:secret"
-    assert body["vp"] == ["/agent/trip/tickets.pdf"] and body["perms"] == ["read"] and body["exp"] == str(3 * 1440)
+    assert body["vp"] == ["/fileshare/trip/tickets.pdf"] and body["perms"] == ["read"] and body["exp"] == str(3 * 1440)
     assert len(body["k"]) == 20 and body["k"].isalnum()
     stored = json.loads((tmp_path / "shares.json").read_text())
     assert stored[0]["key"] == body["k"] and (tmp_path / "shares.json").stat().st_mode & 0o777 == 0o600
 
 
-def test_paths_stay_inside_the_agents_folder(copyparty):
-    share, seen, _ = copyparty
+def test_paths(copyparty):
+    share, seen, config = copyparty
+    assert share._inside("/", "/fileshare/a.txt") == "/fileshare/a.txt"
+    assert share._inside("/", "fileshare/trip/") == "/fileshare/trip/"
+    assert "not the whole" in json.loads(share.handle({"path": "/"}))["error"]
+    # The folder setting narrows it to one folder.
     assert share._inside("/agent", "/agent/a.txt") == "/agent/a.txt"
     assert share._inside("/agent", "trip/") == "/agent/trip/"
     assert share._inside("/agent", "/agent") == "/agent/"
     assert share._inside("/agent", "/music/song.mp3") == "/agent/music/song.mp3"
-    assert "may not contain .." in json.loads(share.handle({"path": "../music/song.mp3"}))["error"]
-    assert not seen
-    assert json.loads(share.handle({"path": "x", "days": 999}))  # clamped, not refused
+    config["plugins"]["entries"]["copyparty-share"]["settings"]["folder"] = "agent/"
+    assert json.loads(share.handle({"path": "/remain/x.txt"}))["path"] == "/agent/remain/x.txt"
+    del config["plugins"]["entries"]["copyparty-share"]["settings"]["folder"]
+    before = len(seen)
+    assert "may not contain .." in json.loads(share.handle({"path": "/fileshare/../remain/x"}))["error"]
+    assert len(seen) == before  # refused before any request
+    assert json.loads(share.handle({"path": "/fileshare/x", "days": 999}))  # clamped, not refused
     assert seen[-1][3]["exp"] == str(30 * 1440)
 
 
 def test_copyparty_refusals_come_back_with_a_hint(copyparty, monkeypatch):
     share, _, _ = copyparty
+    error = json.loads(share.handle({"path": "/remain/home/a.pdf"}))["error"]
+    assert "/remain/home/a.pdf" in error and "shr-who: auth" in error
     error = json.loads(share.handle({"path": "missing.pdf"}))["error"]
     assert "not found on disk" in error and "webdav_list_remote_directory" in error
     monkeypatch.setenv("COPYPARTY_AGENT_PASSWORD", "wrong")
     error = json.loads(share.handle({"path": "a.pdf"}))["error"]
-    assert "/agent/a.pdf" in error and "folder setting" in error and "password is wrong" in error
+    assert "/a.pdf" in error and "webdav_list_remote_directory" in error and "password is wrong" in error
     monkeypatch.delenv("COPYPARTY_AGENT_PASSWORD")
     assert share.available() is False
 

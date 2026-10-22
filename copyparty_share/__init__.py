@@ -1,6 +1,6 @@
 """copyparty_share: temporary Copyparty links that never leave the owner's circle.
 
-The agent shares something from its own Copyparty folder; the link goes to the
+The agent shares something from Copyparty; the link goes to the
 owner or into the calendar and nowhere else. The pre_tool_call guard blocks
 every other tool call whose arguments carry one of the links it made.
 """
