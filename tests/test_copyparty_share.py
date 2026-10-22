@@ -93,7 +93,8 @@ def test_copyparty_refusals_come_back_with_a_hint(copyparty, monkeypatch):
     error = json.loads(share.handle({"path": "missing.pdf"}))["error"]
     assert "not found on disk" in error and "webdav_list_remote_directory" in error
     monkeypatch.setenv("COPYPARTY_AGENT_PASSWORD", "wrong")
-    assert "wrong password" in json.loads(share.handle({"path": "a.pdf"}))["error"]
+    error = json.loads(share.handle({"path": "a.pdf"}))["error"]
+    assert "/agent/a.pdf" in error and "folder setting" in error and "password is wrong" in error
     monkeypatch.delenv("COPYPARTY_AGENT_PASSWORD")
     assert share.available() is False
 

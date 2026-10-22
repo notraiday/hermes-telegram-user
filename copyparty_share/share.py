@@ -191,7 +191,8 @@ def _hint(message: str) -> str:
     if "sharing must be disabled" in lowered:
         return " (Copyparty: shares are off; set shr: /share in [global])"
     if "dont have all the perms" in lowered:
-        return " (wrong password, or the agent has no read access there)"
+        return (" (the agent cannot read that path: its folder must be a Copyparty volume it can read,"
+                " see the plugin's folder setting; or the password is wrong)")
     if "not found on disk" in lowered:
         return " (no such file; check the name with webdav_list_remote_directory)"
     return ""
@@ -215,7 +216,7 @@ def handle(args: Optional[dict[str, Any]] = None, **kwargs: Any) -> str:
             key, url = _create(conf, vpath, days, password)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace").strip()[:300]
-            raise RuntimeError(f"Copyparty answered {exc.code}: {detail}{_hint(detail)}") from None
+            raise RuntimeError(f"Copyparty answered {exc.code} for {vpath}: {detail}{_hint(detail)}") from None
         expires = time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + days * 86400))
         _remember({"key": key, "url": url, "path": vpath, "created": int(time.time()), "expires": expires})
         return json.dumps({"url": url, "path": vpath, "expires": expires, "password": bool(password),
